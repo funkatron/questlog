@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+questlog.log
+watch.out
+
+# Build artifacts
+bin/
+*.o
+*.dSYM/
+
+# Data/exports
+exports/
+questlog.db
+questlog.db-*
+questlog.db-shm
+questlog.db-wal
+
+# Packaging
+build/
+dist/
+*.egg-info/
+questlog.egg-info/
+
+# Test fixtures (avoid committing screenshots)
+tests/fixtures/*.png

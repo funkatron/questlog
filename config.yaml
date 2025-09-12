@@ -1,0 +1,42 @@
+base_folder: "/Users/coj/Library/Containers/com.timesnapper.TimeSnapper/Data/Images"
+
+projects:
+  - "WBD Prototype"
+  - "PEGASAS"
+  - "Geocodio"
+  - "OSMI"
+
+# Per-project aliases improve resolution (tokens, repo names, Jira keys, domains, etc.).
+# Add whatever you commonly see in titles/URLs.
+project_aliases:
+  "WBD Prototype": ["wbd", "wbd-prototype", "neo", "adjuster", "aj", "snowflake", "okta"]
+  "PEGASAS": ["pegasas", "pegasas-silex", "pegasas.aero", "silex"]
+  "Geocodio": ["geocodio", "geocod.io", "api.geocod.io"]
+  "OSMI": ["osmi", "osmihelp.org", "mental health", "handbook"]
+
+blocklist_apps:
+  - "1Password"
+  - "Bitwarden"
+  - "Messages"
+  - "FaceTime"
+  - "Banktivity"
+
+ollama:
+  enabled: true
+  model: "tinydolphin:latest"
+  endpoint: "http://localhost:11434/api/generate"
+  send_image: true
+
+openai:
+  enabled: false
+  model: "gpt-4o-mini"
+  api_base: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"
+  send_image: true
+
+confidence_threshold: 0.65
+grace_gap_seconds: 120
+max_ocr_lines: 40
+logfile: "questlog.log"
+log_max_bytes: 1048576
+log_backups: 2

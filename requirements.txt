@@ -1,0 +1,7 @@
+watchdog
+rapidfuzz
+PyYAML
+requests
+Pillow
+pytesseract
+pytest

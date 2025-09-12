@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "questlog"
+version = "0.1.0"
+description = "On-device activity logging from periodic screenshots"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "watchdog",
+  "rapidfuzz",
+  "PyYAML",
+  "requests",
+]
+
+[project.scripts]
+questlog = "questlog:main"
+ql = "questlog:main"
+
+[tool.setuptools]
+py-modules = ["questlog"]
+
+[tool.setuptools.packages.find]
+include = ["ql"]
+
+
