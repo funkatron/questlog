@@ -12,7 +12,7 @@ project_aliases:
   "WBD Prototype": ["wbd", "wbd-prototype", "neo", "adjuster", "aj", "snowflake", "okta"]
   "PEGASAS": ["pegasas", "pegasas-silex", "pegasas.aero", "silex"]
   "Geocodio": ["geocodio", "geocod.io", "api.geocod.io"]
-  "OSMI": ["osmi", "osmihelp.org", "mental health", "handbook"]
+  "OSMI": ["osmi", "osmihelp.org", "mental health", "handbook", "questlog"]
 
 blocklist_apps:
   - "1Password"
@@ -23,9 +23,17 @@ blocklist_apps:
 
 ollama:
   enabled: true
-  model: "tinydolphin:latest"
   endpoint: "http://localhost:11434/api/generate"
-  send_image: true
+
+  # OCR Model - for extracting text from images
+  ocr:
+    model: "moondream:latest"  # Vision model optimized for text extraction
+    send_image: true
+
+  # Summarization Model - for generating summaries and task classification
+  summarization:
+    model: "tinydolphin:latest"  # Fast small model that works reliably
+    send_image: false
 
 openai:
   enabled: false

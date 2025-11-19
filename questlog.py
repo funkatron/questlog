@@ -1,63 +1,56 @@
 #!/usr/bin/env python3
+"""Questlog CLI - Activity logging from screenshots.
+
+This module provides the command-line interface for Questlog, including
+commands for capturing screenshots, processing images, and exporting logs.
+"""
+
 import argparse
+import csv
 import datetime as dt
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-import re
 import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Iterable
-import csv
 
-import yaml
 import requests
+import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 import ql.db as qldb
-import ql.system as qls
-from ql.text import RE_EMAIL, RE_LONGNUM, RE_URL, redact, find_artifacts, extract_clues, build_ollama_prompt
 import ql.processing as qlp
+import ql.system as qls
+from ql.processing import guess_task, resolve_project, summarize
+from ql.text import build_ollama_prompt, extract_clues, find_artifacts, redact
 
+# Configuration paths
 CONFIG_PATH = Path("config.yaml")
 DB_PATH = Path("questlog.db")
 BIN_FRONTAPP = Path("bin/frontapp")
 BIN_OCR = Path("bin/ocrshot")
 
+# Supported image file extensions
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
-
-DEFAULT_TASK_BY_APP = {
-    "Code": "Coding",
-    "Visual Studio Code": "Coding",
-    "Xcode": "Coding",
-    "Terminal": "Coding",
-    "iTerm2": "Coding",
-    "PyCharm": "Coding",
-    "WebStorm": "Coding",
-    "GoLand": "Coding",
-    "DataGrip": "Coding",
-    "Safari": "Research",
-    "Google Chrome": "Research",
-    "Arc": "Research",
-    "Firefox": "Research",
-    "Slack": "Comms",
-    "Discord": "Comms",
-    "Mail": "Comms",
-    "Spark": "Comms",
-    "Obsidian": "Notes",
-    "Notes": "Notes",
-    "Figma": "Design",
-    "Calendar": "Meeting",
-}
 
 logger = logging.getLogger("questlog")
 
-def setup_logging(cfg: dict) -> None:
+
+def setup_logging(cfg: Dict[str, Any]) -> None:
+    """Configure logging for the application.
+
+    Sets up a rotating file handler based on configuration. Clears existing
+    handlers to avoid duplicates if called multiple times.
+
+    Args:
+        cfg: Configuration dictionary with logfile, log_max_bytes, log_backups.
+    """
     logger.setLevel(logging.INFO)
     # Avoid duplicate handlers if setup_logging is called multiple times
     if logger.handlers:
@@ -69,37 +62,67 @@ def setup_logging(cfg: dict) -> None:
         maxBytes=cfg.get("log_max_bytes", 1_048_576),
         backupCount=cfg.get("log_backups", 2),
     )
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    handler.setFormatter(fmt)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-def load_config() -> dict:
+
+def load_config() -> Dict[str, Any]:
+    """Load configuration from config.yaml.
+
+    Returns:
+        Configuration dictionary parsed from YAML file.
+
+    Raises:
+        FileNotFoundError: If config.yaml doesn't exist.
+        yaml.YAMLError: If config file is invalid YAML.
+    """
     with open(CONFIG_PATH, "r") as f:
         return yaml.safe_load(f)
 
+
 def db() -> sqlite3.Connection:
+    """Get a database connection.
+
+    Returns:
+        SQLite connection to the questlog database.
+    """
     return qldb.connect(DB_PATH)
 
-def run_cmd(cmd: List[str]) -> str:
-    return subprocess.check_output(cmd, text=True).strip()
 
-def front_app_info() -> dict:
+def front_app_info() -> Dict[str, str]:
+    """Get information about the frontmost application.
+
+    Returns:
+        Dictionary with app name, bundle_id, and window_title.
+    """
     return qls.front_app_info(BIN_FRONTAPP)
 
+
 def ocr_lines(path: Path, max_lines: int) -> List[str]:
+    """Extract text lines from an image using OCR.
+
+    Args:
+        path: Path to the image file.
+        max_lines: Maximum number of lines to return.
+
+    Returns:
+        List of OCR-extracted text lines.
+    """
     lines = qls.ocr_lines(BIN_OCR, path, max_lines)
     if not lines and not BIN_OCR.exists():
         logger.warning("ocr binary missing at %s", BIN_OCR)
     return lines
 
-## redaction moved to ql.text.redact
 
 def init_db() -> None:
+    """Initialize the database schema and print confirmation."""
     qldb.ensure_schema(Path("schema.sql").read_text(), DB_PATH)
     print("Initialized DB at", DB_PATH)
 
+
 def ensure_schema() -> None:
-    # Create tables if they don't exist without printing
+    """Ensure database schema exists without printing output."""
     qldb.ensure_schema(Path("schema.sql").read_text(), DB_PATH)
 
 def ensure_today_dir(base_folder: Path) -> Path:
@@ -117,147 +140,23 @@ def store_file_record(conn: sqlite3.Connection, path: str, mtime: float, entry_i
 def insert_entry(conn: sqlite3.Connection, entry: dict, evidence_text: str, file_path: str, mtime: float) -> int:
     return qldb.insert_entry(conn, entry, evidence_text, file_path, mtime)
 
-def guess_task(app: str, ocr_text: str) -> str:
-    if app in ("Terminal", "iTerm2"):
-        if any(k in ocr_text for k in ("pytest", "coverage", "unittest", "rspec")):
-            return "Test"
-        if any(k in ocr_text for k in ("docker", "compose", "kubectl", "terraform", "ansible")):
-            return "Build"
-        if any(k in ocr_text for k in ("git ", "vim ", "nvim ", "code ", "gcc", "make ", "pip ", "uv ")):
-            return "Coding"
-    return DEFAULT_TASK_BY_APP.get(app, "Unknown")
-
-## artifact extraction moved to ql.text.find_artifacts
-
-## clue extraction moved to ql.text.extract_clues
-
-def resolve_project(projects: List[str], aliases: Dict[str, List[str]],
-                    window_title: str, ocr_lines: List[str], clues: Dict[str, Any]) -> Tuple[str, float]:
-    from rapidfuzz import process, fuzz
-
-    hay = " ".join([window_title] + ocr_lines).lower()
-    tokens = set(re.split(r"[\s/\\]+", hay))
-    tokens |= set(clues.get("domains", []))
-    tokens |= set(clues.get("repo_tokens", []))
-
-    best_name = None
-    best_score = 0
-
-    # Build candidate list of (project, alias-token)
-    candidates = []
-    for p in projects or []:
-        candidates.append((p, p))
-        for a in (aliases or {}).get(p, []):
-            candidates.append((p, a))
-
-    for proj, cand in candidates:
-        # Use partial_ratio against tokens set
-        match = process.extractOne(cand.lower(), tokens, scorer=fuzz.partial_ratio)
-        if match:
-            s = match[1]
-            if s > best_score:
-                best_score = s
-                best_name = proj
-    return best_name, best_score / 100.0
-
-## ollama prompt moved to ql.text.build_ollama_prompt
-
-def summarize(
-    cfg: dict,
-    app: str,
-    window_title: str,
-    ocr_top: List[str],
-    project_guess: Tuple[str, float],
-    clues: Dict[str, Any],
-    image_path: Optional[Path] = None,
-):
-    ocr_text = " ".join(ocr_top).lower()
-    coarse_task = guess_task(app, ocr_text)
-
-    summ = window_title if window_title and window_title != "Unknown" else (ocr_top[0] if ocr_top else "")
-    summ = summ.strip() or (f"{coarse_task} in {app}" if coarse_task != "Unknown" else f"Using {app}")
-
-    conf = 0.5
-    if project_guess[0]:
-        conf += 0.15
-    if coarse_task != "Unknown":
-        conf += 0.15
-    if clues.get("urls"):
-        conf += 0.05
-    conf = min(conf, 0.95)
-
-    if cfg.get("ollama", {}).get("enabled", False):
-        try:
-            payload = build_ollama_prompt(cfg, app, window_title, ocr_top, cfg.get("projects", []), clues)
-
-            endpoint_cfg = cfg["ollama"].get("endpoint", "http://localhost:11434")
-            # Normalize URLs
-            def _join(u: str, path: str) -> str:
-                return u.rstrip("/") + path
-            gen_url = endpoint_cfg if endpoint_cfg.endswith("/api/generate") else _join(endpoint_cfg, "/api/generate")
-            model = cfg["ollama"].get("model", "mistral:latest")
-
-            # Prefer a locally available model when the configured one is missing
-            try:
-                tags_url = gen_url.replace("/api/generate", "/api/tags")
-                tags = requests.get(tags_url, timeout=2)
-                names = set()
-                if tags.ok:
-                    tj = tags.json()
-                    listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
-                    for m in listing or []:
-                        if isinstance(m, dict) and m.get("name"):
-                            names.add(m["name"])
-                if model not in names:
-                    if "mistral:latest" in names:
-                        model = "mistral:latest"
-                    elif "llama2:latest" in names:
-                        model = "llama2:latest"
-            except Exception:
-                pass
-
-            raw_response_text = None
-
-            # Always use configured endpoint as-is (no path rewriting). Support images for vision models.
-            gen_payload = {
-                "model": model,
-                "prompt": payload,
-                "stream": False,
-            }
-            if cfg.get("ollama", {}).get("send_image", False) and image_path is not None:
-                gen_payload["images"] = [str(image_path)]
-            gen_resp = requests.post(
-                gen_url,
-                json=gen_payload,
-                timeout=15,
-            )
-            gen_resp.raise_for_status()
-            raw_response_text = (gen_resp.json() or {}).get("response", "")
-            if not raw_response_text:
-                # CLI fallback if HTTP yields empty/unsupported
-                try:
-                    cli_out = subprocess.check_output([
-                        "ollama", "run", model, "-p", payload
-                    ], text=True, timeout=15)
-                    raw_response_text = cli_out.strip()
-                except Exception:
-                    pass
-
-            if raw_response_text:
-                # Try JSON parse first
-                try:
-                    j = json.loads(raw_response_text)
-                    summ = j.get("summary", summ)
-                    coarse_task = j.get("coarse_task", coarse_task)
-                    conf = float(j.get("confidence", conf))
-                except Exception:
-                    # Use raw text as summary if not JSON
-                    summ = (raw_response_text or summ).strip()[:160]
-                    conf = min(max(conf, 0.7), 0.95)
-        except Exception as e:
-            logger.warning("ollama summarize failed: %s", e)
-
-    return summ[:160], coarse_task, float(f"{conf:.2f}")
+def build_historian_prompt(ocr_lines: List[str]) -> str:
+    ocr_block = "\n".join(ocr_lines)
+    return (
+    "You are an activity historian. Analyze the OCR text from a screenshot and write a detailed account of what the user was doing, suitable for a work log.\n\n"
+    "Return Markdown only (no preface, no extra commentary), using exactly these section headings:\n\n"
+    "## What was happening\n- A clear description of the user’s primary task (what they were doing) in 2–4 sentences.\n\n"
+    "## Why (likely intent)\n- Briefly explain the plausible goal(s) driving this task.\n\n"
+    "## Sub‑tasks and steps\n- Bullet list of concrete actions or sub‑steps visible or strongly implied.\n\n"
+    "## Evidence (from the screenshot)\n- 4–8 bullets citing specific on‑screen cues (UI labels, titles, text snippets, filenames, domains). Quote exact text where useful.\n\n"
+    "## Tools and context\n- App(s) in focus and any notable services/sites. If multiple apps are visible, only name one as “in focus” if unambiguous; otherwise write “Unclear.”\n- Any visible files, repos, docs, or environments (quote exact names).\n\n"
+    "## Related project(s)\n- Short project/repo/doc names if strongly indicated; otherwise “Unknown”.\n\n"
+    "## Time and scope estimate\n- Rough estimate of how long this kind of task block would take (e.g., “~10–20 minutes”), based only on what’s visible.\n\n"
+    "## Uncertainties\n- List any ambiguities and what additional signals would resolve them.\n\n"
+    "## Likely next actions\n- 3–5 bullets of what the user would logically do next.\n\n"
+    "Rules:\n- Be concrete and rely only on what’s visible.\n- Do not infer editor/tool names unless visible; quote exact window/tab text when naming tools.\n- If something is unclear, say so under “Uncertainties.”\n- Keep the narrative precise and useful for future review.\n\n"
+    f"OCR:\n{ocr_block}\n"
+    )
 
 def process_image(conn: sqlite3.Connection, cfg: dict, file_path: Path) -> Optional[int]:
     return qlp.process_image(conn, cfg, file_path, BIN_FRONTAPP, BIN_OCR)
@@ -297,7 +196,7 @@ class ShotHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         if event.is_directory:
-            return
+                return
         # Destination path is where the file ends up
         p = Path(getattr(event, 'dest_path', event.src_path))
         self._process_path(p)
@@ -530,7 +429,7 @@ def cmd_analyze_now(args: argparse.Namespace) -> None:
     redacted = [redact(l) for l in ocr_top_raw]
     clues = extract_clues(app, window_title, redacted)
     proj_guess = resolve_project(cfg.get("projects", []), cfg.get("project_aliases", {}), window_title, redacted, clues)
-    summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues, shot)
+    summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues)
     artifacts = find_artifacts(window_title, redacted)
 
     out = {
@@ -547,6 +446,60 @@ def cmd_analyze_now(args: argparse.Namespace) -> None:
     }
     print(json.dumps(out, ensure_ascii=False))
 
+def cmd_what_image(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    setup_logging(cfg)
+    img = Path(args.image).expanduser()
+    if not img.exists():
+        print("Image not found:", img, file=sys.stderr)
+        sys.exit(2)
+
+    ocr_top = ocr_lines(img, cfg.get("max_ocr_lines", 40))
+    prompt = build_historian_prompt(ocr_top)
+
+    # Provider: OpenAI (if enabled) else Ollama generate
+    text = ""
+    try:
+        if (cfg.get("openai", {}) or {}).get("enabled", False):
+            if getattr(args, "vision", False):
+                raise RuntimeError("--vision is not implemented for OpenAI in this command. Enable Ollama or omit --vision.")
+            api_key_env = cfg["openai"].get("api_key_env", "OPENAI_API_KEY")
+            api_key = os.environ.get(api_key_env)
+            if not api_key:
+                raise RuntimeError(f"Missing OpenAI API key in env var {api_key_env}")
+            api_base = cfg["openai"].get("api_base", "https://api.openai.com/v1").rstrip("/")
+            model = cfg["openai"].get("model", "gpt-4o-mini")
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            body = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            }
+            r = requests.post(f"{api_base}/chat/completions", headers=headers, json=body, timeout=60)
+            r.raise_for_status()
+            data = r.json() or {}
+            choices = data.get("choices", [])
+            if choices:
+                text = (choices[0].get("message") or {}).get("content", "").strip()
+        else:
+            endpoint_cfg = cfg["ollama"].get("endpoint", "http://localhost:11434")
+            gen_url = endpoint_cfg if endpoint_cfg.endswith("/api/generate") else endpoint_cfg.rstrip("/") + "/api/generate"
+            model = cfg["ollama"].get("model", "mistral:latest")
+            payload = {"model": model, "prompt": prompt, "stream": False}
+            if getattr(args, "vision", False):
+                payload["images"] = [str(img)]
+            r = requests.post(gen_url, json=payload, timeout=60)
+            r.raise_for_status()
+            text = (r.json() or {}).get("response", "").strip()
+    except Exception as e:
+        print("Historian failed:", e, file=sys.stderr)
+        sys.exit(1)
+
+    out_dir = Path("exports"); out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"historian_{img.stem}.md"
+    out_path.write_text(text or "(no response)")
+    print("Wrote", out_path)
+
 def cmd_analyze_file(args: argparse.Namespace) -> None:
     cfg = load_config()
     setup_logging(cfg)
@@ -562,7 +515,7 @@ def cmd_analyze_file(args: argparse.Namespace) -> None:
     redacted = [redact(l) for l in ocr_top_raw]
     clues = extract_clues(app, window_title, redacted)
     proj_guess = resolve_project(cfg.get("projects", []), cfg.get("project_aliases", {}), window_title, redacted, clues)
-    summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues, img)
+    summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues)
     artifacts = find_artifacts(window_title, redacted)
 
     out = {
@@ -639,6 +592,11 @@ def main() -> None:
     p10 = sub.add_parser("analyze-file", help="Analyze an existing screenshot image (no DB write)")
     p10.add_argument("image", help="Path to screenshot image")
     p10.set_defaults(func=cmd_analyze_file)
+
+    p11 = sub.add_parser("what-image", help="Generate historian Markdown for an image (OCR-only by default)")
+    p11.add_argument("image", help="Path to screenshot image")
+    p11.add_argument("--vision", action="store_true", help="Send the image to Ollama vision model (uses model in config)")
+    p11.set_defaults(func=cmd_what_image)
 
     args = ap.parse_args()
     # Setup logging early for commands that need it

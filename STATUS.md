@@ -1,32 +1,35 @@
-# Questlog — Current Status (WIP)
+# Questlog — Current Status
 
-Last updated: 2025-09-12T19:21:10-04:00
+Last updated: 2025-11-19
 
 ## Summary
-- Prototype CLI for capture/watch, OCR (Swift/Python), optional LLM labeling (Ollama)
-- Exports: Markdown and CSV
-- Activity historian prompt drafted and tested against local models
+- Working CLI for capture/watch, OCR (Swift/Python/LLM), LLM-assisted labeling (Ollama/OpenAI)
+- Exports: Markdown and CSV with session grouping
+- Improved prompts and model selection for better output quality
 
 ## What works
-- Capture (manual and timed), folder watch
-- OCR via Swift helper or Python Tesseract fallback
-- Analyze single image (`analyze-file`) with OCR and LLM call
-- Exports for a selected date (md/csv)
-- Tests: core utilities, LLM mock, Ollama integration (skippable)
+- Capture (manual, timed, and folder watch)
+- OCR via Swift helper, Python Tesseract, or LLM vision model with fallback chain
+- LLM summarization with intelligent model selection and fallbacks
+- Window title fallback from OCR when unavailable
+- Project resolution with fuzzy matching and aliases
+- Exports for selected dates (md/csv) with session grouping
+- Diagnostic logging for quality issues
+- Tests: core utilities, LLM mock, Ollama integration (7 tests passing)
 
-## What needs improvement
-- LLM quality: local tiny models produce weak labels; larger local or cloud provider recommended
-- Vision model support: download and wire (e.g., llava:7b) when bandwidth allows
-- Provider switch: optional OpenAI with budget caps
-- Export formatting: surface "Activity — Summary" when available
+## Recent improvements
+- Consolidated duplicate code into `ql/processing.py`
+- Enhanced LLM prompts with better examples and structure
+- Improved window title detection with OCR fallback
+- Better error handling and diagnostic logging
+- Standardized LLM integration with model selection
 
-## Next steps
-- At home: pull llava:7b or switch to OpenAI (gpt-4o-mini)
-- Add `what` command to summarize a recent window into Markdown using the historian prompt
-- Store `activity` per entry and prefer it in exports
-- Tighten prompts with a few concise examples
+## Known limitations
+- Project resolution can be improved with better fuzzy matching
+- OCR quality depends on Swift binary or Tesseract installation
+- LLM output quality varies by model (smaller models less consistent)
 
-## Risks / unknowns
-- Ollama API shape differences across versions (chat vs generate)
-- OCR noise affecting prompts; may need more filtering/deduping
-- Performance impact at high capture cadence
+## Future enhancements
+- Fine-tune project resolution matching
+- Add activity field to entries and exports
+- Improve export formatting with activity summaries

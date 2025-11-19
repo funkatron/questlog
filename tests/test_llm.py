@@ -16,7 +16,11 @@ class _Resp:
 
 def test_summarize_uses_llm(monkeypatch):
     cfg = {
-        "ollama": {"enabled": True, "model": "qwen2.5:7b-instruct", "endpoint": "http://localhost:11434/api/generate"},
+        "ollama": {
+            "enabled": True, 
+            "endpoint": "http://localhost:11434/api/generate",
+            "summarization": {"model": "qwen2.5:7b-instruct"}
+        },
         "projects": ["Demo"],
         "max_ocr_lines": 5,
     }

@@ -1,27 +1,60 @@
+"""System integration utilities for Questlog.
+
+This module handles macOS-specific operations like app detection and OCR,
+with fallbacks for when native helpers are unavailable.
+"""
+
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any
+
 try:
     from PIL import Image
     import pytesseract
-except Exception:
+except ImportError:
     Image = None
     pytesseract = None
 
 
 def run_cmd(cmd: List[str]) -> str:
+    """Execute a shell command and return its output.
+
+    Args:
+        cmd: List of command and arguments to execute.
+
+    Returns:
+        Stripped stdout output from the command.
+
+    Raises:
+        subprocess.CalledProcessError: If the command returns non-zero exit code.
+    """
     return subprocess.check_output(cmd, text=True).strip()
 
 
-def front_app_info(frontapp_bin: Path) -> dict:
+def front_app_info(frontapp_bin: Path) -> Dict[str, str]:
+    """Get information about the frontmost application and window.
+
+    Attempts to use the native Swift helper first, then falls back to AppleScript
+    if the helper is not available. Requires Accessibility permissions on macOS.
+
+    Args:
+        frontapp_bin: Path to the Swift frontapp binary.
+
+    Returns:
+        Dictionary with keys:
+        - bundle_id: Application bundle identifier.
+        - app: Application name.
+        - window_title: Title of the frontmost window, or "Unknown" if unavailable.
+    """
     if frontapp_bin.exists():
-        out = run_cmd([str(frontapp_bin)])
-        return json.loads(out)
-    # AppleScript fallback
-    script = (
+        output = run_cmd([str(frontapp_bin)])
+        return json.loads(output)
+
+    # AppleScript fallback when Swift helper is unavailable
+    applescript = (
         'tell application "System Events"\n'
         '  set frontApp to first application process whose frontmost is true\n'
         '  set appName to name of frontApp\n'
@@ -33,33 +66,131 @@ def front_app_info(frontapp_bin: Path) -> dict:
         'return appName & "\n" & winTitle\n'
     )
     try:
-        out = subprocess.check_output(["osascript", "-e", script], text=True).splitlines()
-        app = out[0].strip() if out else "Unknown"
-        title = out[1].strip() if len(out) > 1 else "Unknown"
-        return {"bundle_id": "unknown.bundle", "app": app or "Unknown", "window_title": title or "Unknown"}
+        output = subprocess.check_output(
+            ["osascript", "-e", applescript],
+            text=True
+        ).splitlines()
+        app_name = output[0].strip() if output else "Unknown"
+        window_title = output[1].strip() if len(output) > 1 else "Unknown"
+        return {
+            "bundle_id": "unknown.bundle",
+            "app": app_name or "Unknown",
+            "window_title": window_title or "Unknown"
+        }
     except Exception:
-        return {"bundle_id": "unknown.bundle", "app": "Unknown", "window_title": "Unknown"}
+        return {
+            "bundle_id": "unknown.bundle",
+            "app": "Unknown",
+            "window_title": "Unknown"
+        }
 
 
 def ocr_lines(ocr_bin: Path, path: Path, max_lines: int) -> List[str]:
+    """Extract text lines from an image using OCR.
+
+    Attempts to use the native Swift OCR helper first, then falls back to
+    Python Tesseract if the helper is unavailable or fails.
+
+    Args:
+        ocr_bin: Path to the Swift OCR binary.
+        path: Path to the image file.
+        max_lines: Maximum number of lines to return.
+
+    Returns:
+        List of non-empty text lines extracted from the image, up to max_lines.
+        Returns empty list if OCR fails or dependencies are unavailable.
+    """
     # Prefer native Swift OCR helper
     if ocr_bin.exists():
         try:
-            out = run_cmd([str(ocr_bin), str(path)])
-            lines = [l for l in out.splitlines() if l.strip()]
+            output = run_cmd([str(ocr_bin), str(path)])
+            lines = [line for line in output.splitlines() if line.strip()]
             if lines:
                 return lines[:max_lines]
         except Exception:
             pass
+
     # Python fallback via Tesseract
     if Image is None or pytesseract is None:
         return []
     try:
-        img = Image.open(path)
-        text = pytesseract.image_to_string(img)
-        lines = [l for l in text.splitlines() if l.strip()]
+        image = Image.open(path)
+        text = pytesseract.image_to_string(image)
+        lines = [line for line in text.splitlines() if line.strip()]
         return lines[:max_lines]
     except Exception:
         return []
+
+
+def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
+    """Extract text from an image using an LLM vision model.
+
+    Uses a vision-capable model (like moondream) to extract text from screenshots.
+    Falls back gracefully if the model is unavailable or the request fails.
+
+    Args:
+        cfg: Configuration dictionary with Ollama settings.
+        path: Path to the image file.
+        max_lines: Maximum number of lines to return.
+
+    Returns:
+        List of text lines extracted by the vision model, up to max_lines.
+        Returns empty list if LLM OCR is disabled, model unavailable, or request fails.
+    """
+    if not cfg.get("ollama", {}).get("enabled", False):
+        return []
+
+    try:
+        import requests
+
+        ocr_cfg = cfg["ollama"].get("ocr", {})
+        if not ocr_cfg.get("model"):
+            return []
+
+        endpoint_cfg = cfg["ollama"].get("endpoint", "http://localhost:11434")
+        def _join(u: str, path: str) -> str:
+            return u.rstrip("/") + path
+        gen_url = endpoint_cfg if endpoint_cfg.endswith("/api/generate") else _join(endpoint_cfg, "/api/generate")
+
+        model = ocr_cfg.get("model")
+
+        # Check if model is available
+        try:
+            tags_url = gen_url.replace("/api/generate", "/api/tags")
+            tags = requests.get(tags_url, timeout=2)
+            names = set()
+            if tags.ok:
+                tj = tags.json()
+                listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
+                for m in listing or []:
+                    if isinstance(m, dict) and m.get("name"):
+                        names.add(m["name"])
+            if model not in names:
+                return []  # Model not available, fall back to traditional OCR
+        except Exception:
+            return []
+
+        # Use vision model for OCR
+        prompt = "Extract all visible text from this image. Return only the text content, one line per line of text."
+
+        gen_payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "images": [str(path)]
+        }
+
+        resp = requests.post(gen_url, json=gen_payload, timeout=30)
+        resp.raise_for_status()
+
+        response_text = (resp.json() or {}).get("response", "")
+        if response_text:
+            lines = [l.strip() for l in response_text.splitlines() if l.strip()]
+            return lines[:max_lines]
+
+    except Exception:
+        pass
+
+    return []
 
 
