@@ -27,10 +27,16 @@ Questlog logs your computer activity by analyzing periodic screenshots. It uses 
 
 ```bash
 # Using uv (recommended)
-uv sync
+uv sync                    # Core dependencies
+uv sync --extra ocr        # Include OCR fallback (Pillow, pytesseract)
+uv sync --extra dev        # Include dev tools (pytest, etc.)
+uv sync --all-extras       # Everything
 
 # Or using pip
-pip install -r requirements.txt
+pip install -e .           # Core dependencies only
+pip install -e ".[ocr]"    # With OCR fallback
+pip install -e ".[dev]"    # With dev tools
+pip install -e ".[all]"    # Everything
 ```
 
 3. Build Swift helpers (macOS only):
