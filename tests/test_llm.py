@@ -41,9 +41,10 @@ def test_summarize_uses_llm(monkeypatch):
     def _fake_post(url, json=None, timeout=10):
         return _Resp(llm_json)
 
-    monkeypatch.setattr(ql.requests, "post", _fake_post)
+    import requests
+    monkeypatch.setattr(requests, "post", _fake_post)
 
-    summary, coarse_task, confidence = ql.summarize(cfg, app, window_title, ocr_top, project_guess, clues)
+    summary, coarse_task, confidence = summarize(cfg, app, window_title, ocr_top, project_guess, clues)
     assert summary == "Working on foo.py"
     assert coarse_task == "Coding"
     assert abs(confidence - 0.9) < 1e-6
