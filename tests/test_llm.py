@@ -1,6 +1,6 @@
 import json
 
-import questlog as ql
+from ql.processing import summarize
 
 
 class _Resp:
