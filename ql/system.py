@@ -34,14 +34,11 @@ def run_cmd(cmd: List[str]) -> str:
     return subprocess.check_output(cmd, text=True).strip()
 
 
-def front_app_info(frontapp_bin: Path) -> Dict[str, str]:
+def front_app_info() -> Dict[str, str]:
     """Get information about the frontmost application and window.
 
-    Attempts to use the native Swift helper first, then falls back to AppleScript
-    if the helper is not available. Requires Accessibility permissions on macOS.
-
-    Args:
-        frontapp_bin: Path to the Swift frontapp binary.
+    Uses AppleScript to detect the frontmost app and window title.
+    Requires Accessibility permissions on macOS.
 
     Returns:
         Dictionary with keys:
@@ -49,11 +46,7 @@ def front_app_info(frontapp_bin: Path) -> Dict[str, str]:
         - app: Application name.
         - window_title: Title of the frontmost window, or "Unknown" if unavailable.
     """
-    if frontapp_bin.exists():
-        output = run_cmd([str(frontapp_bin)])
-        return json.loads(output)
-
-    # AppleScript fallback when Swift helper is unavailable
+    # Use AppleScript for app detection
     applescript = (
         'tell application "System Events"\n'
         '  set frontApp to first application process whose frontmost is true\n'
@@ -85,14 +78,12 @@ def front_app_info(frontapp_bin: Path) -> Dict[str, str]:
         }
 
 
-def ocr_lines(ocr_bin: Path, path: Path, max_lines: int) -> List[str]:
+def ocr_lines(path: Path, max_lines: int) -> List[str]:
     """Extract text lines from an image using OCR.
 
-    Attempts to use the native Swift OCR helper first, then falls back to
-    Python Tesseract if the helper is unavailable or fails.
+    Uses Python Tesseract for OCR extraction.
 
     Args:
-        ocr_bin: Path to the Swift OCR binary.
         path: Path to the image file.
         max_lines: Maximum number of lines to return.
 
@@ -100,17 +91,7 @@ def ocr_lines(ocr_bin: Path, path: Path, max_lines: int) -> List[str]:
         List of non-empty text lines extracted from the image, up to max_lines.
         Returns empty list if OCR fails or dependencies are unavailable.
     """
-    # Prefer native Swift OCR helper
-    if ocr_bin.exists():
-        try:
-            output = run_cmd([str(ocr_bin), str(path)])
-            lines = [line for line in output.splitlines() if line.strip()]
-            if lines:
-                return lines[:max_lines]
-        except Exception:
-            pass
-
-    # Python fallback via Tesseract
+    # Use Python Tesseract for OCR
     if Image is None or pytesseract is None:
         return []
     try:
@@ -173,11 +154,16 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
         # Use vision model for OCR
         prompt = "Extract all visible text from this image. Return only the text content, one line per line of text."
 
+        # Encode image to base64 for Ollama API
+        import base64
+        with open(path, "rb") as img_file:
+            image_data = base64.b64encode(img_file.read()).decode("utf-8")
+
         gen_payload = {
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "images": [str(path)]
+            "images": [image_data]
         }
 
         resp = requests.post(gen_url, json=gen_payload, timeout=30)
@@ -188,7 +174,10 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
             lines = [l.strip() for l in response_text.splitlines() if l.strip()]
             return lines[:max_lines]
 
-    except Exception:
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("questlog")
+        logger.debug("LLM OCR failed: %s", e)
         pass
 
     return []

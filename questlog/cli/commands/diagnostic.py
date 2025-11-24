@@ -13,8 +13,6 @@ from questlog.services import ImageService
 app = typer.Typer(name="diagnostic", help="Diagnostic commands")
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
-BIN_FRONTAPP = Path("bin/frontapp")
-BIN_OCR = Path("bin/ocrshot")
 
 
 @app.command()
@@ -38,14 +36,6 @@ def doctor() -> None:
     else:
         today_dir = base / dt.date.today().strftime("%Y-%m-%d")
         typer.echo(f"  Today subdir: {today_dir} (exists: {today_dir.exists()})")
-
-    # Binaries
-    typer.echo(f"Frontapp binary: {BIN_FRONTAPP} (exists: {BIN_FRONTAPP.exists()})")
-    typer.echo(f"OCR binary: {BIN_OCR} (exists: {BIN_OCR.exists()})")
-    if not BIN_FRONTAPP.exists() or not BIN_OCR.exists():
-        typer.echo(
-            "  [i] One or more Swift helpers missing. You can still run with degraded features."
-        )
 
     # Try front app info
     try:
@@ -72,7 +62,7 @@ def doctor() -> None:
                     break
             if test_file:
                 break
-    if test_file and BIN_OCR.exists():
+    if test_file:
         try:
             lines = image_service.ocr_lines(test_file, cfg.max_ocr_lines)
             typer.echo(f"  OCR ok; {len(lines)} lines from {test_file.name}")
@@ -80,7 +70,7 @@ def doctor() -> None:
             typer.echo(f"  [!] OCR test failed: {e}")
             ok = False
     else:
-        typer.echo("  [i] OCR sanity check skipped (no sample image or ocr helper missing).")
+        typer.echo("  [i] OCR sanity check skipped (no sample image found).")
 
     result = "OK" if ok else "Issues found. See README and questlog.log for guidance."
     typer.echo(f"Doctor result: {result}")

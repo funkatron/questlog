@@ -18,19 +18,13 @@ class ImageService:
     def __init__(
         self,
         config: QuestlogConfig,
-        frontapp_bin: Path = Path("bin/frontapp"),
-        ocr_bin: Path = Path("bin/ocrshot"),
     ):
         """Initialize image service.
 
         Args:
             config: Questlog configuration.
-            frontapp_bin: Path to Swift frontapp binary.
-            ocr_bin: Path to Swift OCR binary.
         """
         self.config = config
-        self.frontapp_bin = frontapp_bin
-        self.ocr_bin = ocr_bin
 
     def front_app_info(self) -> dict[str, str]:
         """Get information about the frontmost application.
@@ -38,7 +32,7 @@ class ImageService:
         Returns:
             Dictionary with app name, bundle_id, and window_title.
         """
-        return qls.front_app_info(self.frontapp_bin)
+        return qls.front_app_info()
 
     def ocr_lines(self, path: Path, max_lines: int) -> list[str]:
         """Extract text lines from an image using OCR.
@@ -50,10 +44,7 @@ class ImageService:
         Returns:
             List of OCR-extracted text lines.
         """
-        lines = qls.ocr_lines(self.ocr_bin, path, max_lines)
-        if not lines and not self.ocr_bin.exists():
-            logger.warning("ocr binary missing at %s", self.ocr_bin)
-        return lines
+        return qls.ocr_lines(path, max_lines)
 
     def ensure_today_dir(self, base_folder: Path) -> Path:
         """Ensure today's date directory exists in base folder.
@@ -69,19 +60,21 @@ class ImageService:
         return today_dir
 
     def process_image(
-        self, conn, file_path: Path
+        self, conn, file_path: Path, use_app_detection: bool = True
     ) -> Optional[int]:
         """Process an image and create database entry.
 
         Args:
             conn: Database connection.
             file_path: Path to image file.
+            use_app_detection: If True, detect current frontmost app.
+                If False, infer app from OCR/window title (for historical screenshots).
 
         Returns:
             Entry ID if successful, None otherwise.
         """
         return qlp.process_image(
-            conn, self.config.to_dict(), file_path, self.frontapp_bin, self.ocr_bin
+            conn, self.config.to_dict(), file_path, use_app_detection=use_app_detection
         )
 
     def iter_images(self, base_folder: Path):

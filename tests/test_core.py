@@ -57,8 +57,8 @@ def test_process_image_inserts_entry(tmp_path, monkeypatch):
     img.write_bytes(b"fake")
 
     # Stub dependencies at processing/system layer after refactor
-    monkeypatch.setattr(qls, "ocr_lines", lambda ocr_bin, p, n: ["Title Foo", "bar"])
-    monkeypatch.setattr(qls, "front_app_info", lambda front_bin: {"app": "TestApp", "window_title": "Window Foo"})
+    monkeypatch.setattr(qls, "ocr_lines", lambda p, n: ["Title Foo", "bar"])
+    monkeypatch.setattr(qls, "front_app_info", lambda: {"app": "TestApp", "window_title": "Window Foo"})
 
     cfg = {
         "projects": ["TestProj"],
@@ -71,7 +71,7 @@ def test_process_image_inserts_entry(tmp_path, monkeypatch):
     db_service = DatabaseService(db_path=tmp_path / "test.db")
     db_service.ensure_schema()
     with db_service.connect() as conn:
-        entry_id = process_image(conn, cfg, img, Path("bin/frontapp"), Path("bin/ocrshot"))
+        entry_id = process_image(conn, cfg, img)
         assert entry_id is not None
         cur = conn.execute("select project, app from entries where id=?", (entry_id,))
         row = cur.fetchone()
