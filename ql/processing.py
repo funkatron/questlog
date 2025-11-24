@@ -413,8 +413,11 @@ def process_image(
             window_title = "Unknown"
 
     # SUPPLEMENTAL: OCR for additional text context
+    # Try EasyOCR first (best quality), then LLM OCR, then Tesseract
     max_ocr_lines = cfg.get("max_ocr_lines", 12)
-    ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
+    ocr_top_raw = qls.ocr_with_easyocr(file_path, max_ocr_lines)
+    if not ocr_top_raw:
+        ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
     if not ocr_top_raw:
         ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
 

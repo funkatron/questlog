@@ -379,9 +379,11 @@ def _process_single_image(image_path: Path, cfg, image_service: ImageService) ->
     vision_result = qls.analyze_image_with_vision(cfg.to_dict(), image_path)
     vision_available = bool(vision_result)
 
-    # SUPPLEMENTAL: Extract OCR
+    # SUPPLEMENTAL: Extract OCR (EasyOCR -> LLM OCR -> Tesseract)
     max_ocr_lines = cfg.max_ocr_lines
-    ocr_raw = qls.ocr_with_llm(cfg.to_dict(), image_path, max_ocr_lines)
+    ocr_raw = qls.ocr_with_easyocr(image_path, max_ocr_lines)
+    if not ocr_raw:
+        ocr_raw = qls.ocr_with_llm(cfg.to_dict(), image_path, max_ocr_lines)
     if not ocr_raw:
         ocr_raw = qls.ocr_lines(image_path, max_ocr_lines)
 

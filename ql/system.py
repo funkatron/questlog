@@ -18,6 +18,20 @@ except ImportError:
     Image = None
     pytesseract = None
 
+# EasyOCR with caching - load model once and reuse
+_easyocr_reader = None
+
+def _get_easyocr_reader():
+    """Get or create cached EasyOCR reader instance."""
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            import easyocr
+            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
+        except ImportError:
+            return None
+    return _easyocr_reader
+
 
 def run_cmd(cmd: List[str]) -> str:
     """Execute a shell command and return its output.
@@ -78,10 +92,45 @@ def front_app_info() -> Dict[str, str]:
         }
 
 
+def ocr_with_easyocr(path: Path, max_lines: int, min_confidence: float = 0.5) -> List[str]:
+    """Extract text from an image using EasyOCR (deep learning OCR).
+
+    Uses EasyOCR for high-quality text extraction. The model is cached
+    and reused across calls for better performance.
+
+    Args:
+        path: Path to the image file.
+        max_lines: Maximum number of lines to return.
+        min_confidence: Minimum confidence threshold (0.0-1.0).
+
+    Returns:
+        List of text lines extracted by EasyOCR, up to max_lines.
+        Returns empty list if EasyOCR is unavailable or fails.
+    """
+    reader = _get_easyocr_reader()
+    if reader is None:
+        return []
+
+    try:
+        results = reader.readtext(str(path))
+        # Filter by confidence and extract text
+        lines = [
+            text.strip()
+            for (bbox, text, conf) in results
+            if conf >= min_confidence and text.strip() and len(text.strip()) > 2
+        ]
+        return lines[:max_lines]
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("questlog")
+        logger.debug("EasyOCR failed: %s", e)
+        return []
+
+
 def ocr_lines(path: Path, max_lines: int) -> List[str]:
     """Extract text lines from an image using OCR.
 
-    Uses Python Tesseract for OCR extraction.
+    Uses Python Tesseract for OCR extraction with optimized settings for screenshots.
 
     Args:
         path: Path to the image file.
@@ -96,9 +145,36 @@ def ocr_lines(path: Path, max_lines: int) -> List[str]:
         return []
     try:
         image = Image.open(path)
-        text = pytesseract.image_to_string(image)
-        lines = [line for line in text.splitlines() if line.strip()]
-        return lines[:max_lines]
+
+        # Try multiple PSM modes for better accuracy
+        # PSM 6 = Uniform block of text (good for code/UI)
+        # PSM 11 = Sparse text (good for scattered UI elements)
+        # PSM 13 = Raw line (no layout analysis)
+        psm_modes = [6, 11, 13]
+        all_lines = set()
+
+        for psm in psm_modes:
+            try:
+                # Use double braces to escape in f-string
+                whitelist = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,;:!?@#$%^&*()_+-=[]{{}}|\\/"\'<>~` '
+                config = f'--psm {psm} -c tessedit_char_whitelist={whitelist}'
+                text = pytesseract.image_to_string(image, config=config)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                all_lines.update(lines)
+            except Exception:
+                continue
+
+        # If no results with whitelist, try without it
+        if not all_lines:
+            try:
+                text = pytesseract.image_to_string(image, config='--psm 6')
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                all_lines.update(lines)
+            except Exception:
+                pass
+
+        result = list(all_lines)[:max_lines]
+        return result
     except Exception:
         return []
 
@@ -151,8 +227,18 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
         except Exception:
             return []
 
-        # Use vision model for OCR
-        prompt = "Extract all visible text from this image. Return only the text content, one line per line of text."
+        # Use vision model for OCR with improved prompt to reduce hallucinations
+        prompt = """Extract ONLY the actual visible text from this screenshot image.
+
+CRITICAL RULES:
+- Return ONLY text that you can clearly see in the image
+- Do NOT invent, guess, or hallucinate text
+- Do NOT add explanations or commentary
+- Preserve line breaks as they appear
+- Include window titles, file names, URLs, code snippets, button labels, and any other visible text
+- If you cannot clearly read text, skip it rather than guessing
+
+Return the text content line by line, exactly as it appears."""
 
         # Encode image to base64 for Ollama API
         import base64
@@ -171,8 +257,72 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
 
         response_text = (resp.json() or {}).get("response", "")
         if response_text:
-            lines = [l.strip() for l in response_text.splitlines() if l.strip()]
-            return lines[:max_lines]
+            # Filter out common hallucination patterns and extract actual text
+            filtered_lines = []
+            skip_patterns = [
+                "The image",
+                "I can",
+                "Here's",
+                "Sure,",
+                "This image",
+                "The screenshot",
+                "There is no",
+                "does not contain",
+                "This is an",
+                "indicating",
+                "suggesting",
+                "likely",
+                "possibly",
+                "shows:",
+                "showing",
+            ]
+
+            # Look for bullet points or quoted text (actual extracted text)
+            in_list = False
+            for line in response_text.splitlines():
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+
+                # Skip explanation lines
+                if any(line_stripped.startswith(pattern) for pattern in skip_patterns):
+                    continue
+
+                # Extract bullet point content (often contains actual text)
+                if line_stripped.startswith('- ') or line_stripped.startswith('* '):
+                    # Remove bullet and extract quoted text if present
+                    content = line_stripped[2:].strip()
+                    # Extract text from quotes
+                    if '"' in content:
+                        import re
+                        quoted = re.findall(r'"([^"]+)"', content)
+                        if quoted:
+                            filtered_lines.extend(quoted)
+                            continue
+                    # Or use the content after the bullet
+                    if content and len(content) > 3:
+                        filtered_lines.append(content)
+                    continue
+
+                # Extract quoted text
+                if '"' in line_stripped:
+                    import re
+                    quoted = re.findall(r'"([^"]+)"', line_stripped)
+                    if quoted:
+                        filtered_lines.extend(quoted)
+                        continue
+
+                # Skip lines that are explanations (contain words like "indicating", "suggesting")
+                if any(word in line_stripped.lower() for word in ['indicating', 'suggesting', 'likely', 'possibly', 'probably']):
+                    continue
+
+                # Remove markdown code blocks if present
+                line_stripped = line_stripped.strip('`').strip()
+                # Only add if it looks like actual text (not an explanation)
+                if line_stripped and len(line_stripped) > 2 and not line_stripped.endswith(':'):
+                    filtered_lines.append(line_stripped)
+
+            return filtered_lines[:max_lines]
 
     except Exception as e:
         import logging

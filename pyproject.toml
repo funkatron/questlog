@@ -41,6 +41,7 @@ dev = [
 ocr = [
     "Pillow",
     "pytesseract",
+    "easyocr",
 ]
 all = [
     "pytest>=7.0.0",

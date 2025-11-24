@@ -29,7 +29,7 @@ ollama:
 
   # OCR Model - for extracting text from images
   ocr:
-    model: "moondream:latest"  # Vision model optimized for text extraction
+    model: "llava:7b"  # Use llava for better text extraction (moondream wasn't working)
     send_image: true
 
   # Summarization Model - for generating summaries and task classification
