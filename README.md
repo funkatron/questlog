@@ -5,11 +5,12 @@ Questlog logs your computer activity by analyzing periodic screenshots. It uses 
 ## What it does
 
 1. **Captures screenshots** at intervals or watches a folder for new screenshots
-2. **Extracts text** from screenshots using OCR (Swift helper or Python Tesseract fallback)
-3. **Identifies context** like the active app, window title, and visible text
-4. **Generates summaries** using local LLM (Ollama) or cloud API (OpenAI) if enabled
-5. **Stores entries** in a SQLite database with timestamps, app names, tasks, and summaries
-6. **Exports logs** as Markdown or CSV for review
+2. **Analyzes images** using vision-first approach with LLM vision models for holistic scene understanding
+3. **Extracts text** from screenshots using EasyOCR (primary), LLM OCR, or Tesseract fallback
+4. **Identifies context** like visible apps, window titles, layout, activities, and projects
+5. **Generates summaries** using local LLM (Ollama) or cloud API (OpenAI) if enabled
+6. **Stores entries** in a SQLite database with timestamps, app names, tasks, and summaries
+7. **Exports logs** as Markdown or CSV for review
 
 ## Quickstart
 
@@ -28,26 +29,20 @@ Questlog logs your computer activity by analyzing periodic screenshots. It uses 
 ```bash
 # Using uv (recommended)
 uv sync                    # Core dependencies
-uv sync --extra ocr        # Include OCR fallback (Pillow, pytesseract)
+uv sync --extra ocr        # Include OCR (EasyOCR, Pillow, pytesseract)
 uv sync --extra dev        # Include dev tools (pytest, etc.)
 uv sync --all-extras       # Everything
 
 # Or using pip
 pip install -e .           # Core dependencies only
-pip install -e ".[ocr]"    # With OCR fallback
+pip install -e ".[ocr]"    # With OCR (EasyOCR recommended for best quality)
 pip install -e ".[dev]"    # With dev tools
 pip install -e ".[all]"    # Everything
 ```
 
-3. Build Swift helpers (macOS only):
+**Note:** EasyOCR is recommended for best OCR quality. It uses deep learning models and provides much better text extraction than Tesseract. The model is cached after first load for performance.
 
-```bash
-make build
-```
-
-This creates `bin/frontapp` and `bin/ocrshot` for better app detection and OCR on macOS.
-
-4. Initialize the database:
+3. Initialize the database:
 
 ```bash
 uv run questlog init-db
@@ -100,10 +95,15 @@ ollama:
   endpoint: "http://localhost:11434/api/generate"
 
   ocr:
-    model: "moondream:latest"  # Vision model for text extraction
+    model: "llava:7b"  # Vision model for text extraction (used if LLM OCR enabled)
 
   summarization:
     model: "tinydolphin:latest"  # Text model for summaries
+
+  # Vision Analysis - for holistic scene understanding (primary analysis method)
+  vision_analysis:
+    model: "llava:7b"  # Vision model for scene understanding
+    enabled: true  # Enable vision-first analysis
 
 # OpenAI configuration (optional, alternative to Ollama)
 openai:
@@ -173,12 +173,13 @@ Exports are written to the `exports/` directory.
 ## How it works
 
 1. **Screenshot capture**: Uses macOS `screencapture` or watches a folder
-2. **App detection**: Swift helper or AppleScript fallback to identify the frontmost app and window title
-3. **OCR**: Extracts visible text using Swift Vision framework, Python Tesseract, or LLM vision model
-4. **Context extraction**: Identifies URLs, domains, and project hints from window titles and OCR text
-5. **Project matching**: Fuzzy matches window titles and OCR content against your project list
-6. **Summarization**: If LLM is enabled, generates a concise summary and task classification
-7. **Storage**: Saves entry with timestamp, app, task type, summary, and confidence score
+2. **Vision analysis** (primary): Uses LLM vision model (llava:7b) to understand the entire screenshot scene - identifying apps, window titles, layout, activities, and projects
+3. **OCR extraction** (supplemental): Extracts visible text using EasyOCR (primary), LLM OCR, or Tesseract fallback
+4. **App detection**: AppleScript to identify frontmost app, or inferred from vision analysis for historical screenshots
+5. **Context extraction**: Identifies URLs, domains, and project hints from vision analysis and OCR text
+6. **Project matching**: Fuzzy matches window titles and OCR content against your project list
+7. **Summarization**: If LLM is enabled, generates a concise summary and task classification (uses vision analysis if available)
+8. **Storage**: Saves entry with timestamp, app, task type, summary, and confidence score
 
 ## Output quality
 
@@ -205,11 +206,28 @@ uv run pytest
 ```
 
 Project structure:
-- `questlog.py` - CLI entry point and commands
+- `questlog/cli/app.py` - Main CLI application
+- `questlog/cli/commands/` - Individual command modules (capture, analyze, export, benchmark, etc.)
+- `questlog/services/` - Service layer (DatabaseService, ImageService, ExportService)
+- `questlog/config.py` - Configuration management with Pydantic
 - `ql/processing.py` - Core image processing and summarization
-- `ql/system.py` - System integration (app detection, OCR)
+- `ql/system.py` - System integration (app detection, OCR, vision analysis)
 - `ql/text.py` - Text processing and prompt building
 - `ql/db.py` - Database operations
+
+## Benchmark Tool
+
+Use the benchmark tool to visualize what QuestLog extracts from screenshots:
+
+```bash
+# Analyze a single image
+questlog benchmark path/to/image.jpg
+
+# Process a directory of images
+questlog benchmark --directory /path/to/images
+```
+
+This generates markdown reports showing the screenshot alongside vision analysis results, OCR extraction, app detection, and final summary.
 
 ## License
 
