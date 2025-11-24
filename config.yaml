@@ -37,6 +37,11 @@ ollama:
     model: "tinydolphin:latest"  # Fast small model that works reliably
     send_image: false
 
+  # Vision Analysis - for holistic scene understanding (primary analysis method)
+  vision_analysis:
+    model: "llava:7b"  # Vision model for scene understanding (better than moondream for this task)
+    enabled: true  # Enable vision-first analysis
+
 openai:
   enabled: false
   model: "gpt-4o-mini"

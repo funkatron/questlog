@@ -5,7 +5,7 @@ This module handles text redaction, clue extraction, and LLM prompt construction
 
 import os
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 # Regular expressions for privacy-sensitive patterns
@@ -112,7 +112,7 @@ def filter_ocr_cruft(lines: List[str]) -> List[str]:
         # Skip lines that look like timestamps or dates
         if re.search(r'\d{1,2}[:/]\d{1,2}([:/]\d{1,4})?', line_stripped) and letters < 4:
             continue
-        
+
         # Skip lines that look like system stats/overlays (GPU, CPU, memory stats)
         # e.g., "PU GPU FS LOA U 12.808 U 21" or "47.095"
         if re.search(r'\b(gpu|cpu|mem|ram|fs|loa)\b', line_stripped, re.IGNORECASE) and digits > letters:
@@ -247,11 +247,13 @@ def build_ollama_prompt(
     ocr_top: List[str],
     projects: List[str],
     clues: Dict[str, Any],
+    vision_result: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build a prompt for LLM-based activity summarization.
 
     Constructs a structured prompt that guides the LLM to analyze screenshot
     context and generate a concise summary with task classification.
+    Includes vision analysis context if available.
 
     Args:
         cfg: Configuration dictionary containing max_ocr_lines and other settings.
@@ -260,6 +262,7 @@ def build_ollama_prompt(
         ocr_top: Top OCR lines extracted from the screenshot.
         projects: List of known project names for context.
         clues: Dictionary of extracted clues (URLs, domains, tokens).
+        vision_result: Optional vision analysis result dictionary.
 
     Returns:
         A formatted prompt string ready to send to the LLM.
@@ -275,6 +278,22 @@ def build_ollama_prompt(
     if projects:
         project_hint = f"\n- Known Projects: {', '.join(projects)}"
 
+    # Include vision analysis context if available
+    vision_context = ""
+    if vision_result:
+        vision_apps = vision_result.get("apps_visible", [])
+        vision_layout = vision_result.get("layout_description", "")
+        vision_activity = vision_result.get("primary_activity", "")
+        if vision_apps or vision_layout or vision_activity:
+            vision_context = "\n\nVISION ANALYSIS CONTEXT (from image understanding):"
+            if vision_apps:
+                vision_context += f"\n- Apps visible: {', '.join(vision_apps)}"
+            if vision_layout:
+                vision_context += f"\n- Layout: {vision_layout}"
+            if vision_activity:
+                vision_context += f"\n- Primary activity detected: {vision_activity}"
+            vision_context += "\n(Use this visual understanding to enhance your analysis)"
+
     prompt = f"""You are labeling a work activity snapshot. Analyze the context and return a JSON response.
 
 TASK TAXONOMY (choose exactly one): {taxonomy}
@@ -284,7 +303,7 @@ CONTEXT:
 - Window Title: {window_title}
 - OCR Text (visible on screen):
 {ocr_block}
-- URLs/Domains: {clues.get('urls', [])[:3]}{project_hint}
+- URLs/Domains: {clues.get('urls', [])[:3]}{project_hint}{vision_context}
 
 RULES:
 1. If window title is "Unknown", infer from OCR text and app name
@@ -319,6 +338,55 @@ REQUIRED OUTPUT FORMAT (JSON only):
 }}
 
 Return ONLY valid JSON, no other text.""".strip()
+    return prompt
+
+
+def build_vision_analysis_prompt(projects: List[str] = None) -> str:
+    """Build a prompt for comprehensive vision-based image analysis.
+
+    Creates a structured prompt that guides the vision model to understand
+    the entire screenshot scene, not just extract text.
+
+    Args:
+        projects: Optional list of known project names for context.
+
+    Returns:
+        Formatted prompt string for vision analysis.
+    """
+    project_hint = ""
+    if projects:
+        project_hint = f"\n- Known Projects: {', '.join(projects)}"
+
+    prompt = f"""Analyze this screenshot image comprehensively. Identify all visible applications, windows, and activities.
+
+Return a JSON object with the following structure:
+
+{{
+  "apps_visible": ["App1", "App2"],
+  "primary_app": "AppName",
+  "window_titles": ["Window Title 1", "Window Title 2"],
+  "primary_window_title": "Main Window Title",
+  "layout": "single-window|dual-pane|multi-window|split-screen",
+  "layout_description": "Brief description of screen layout",
+  "primary_activity": "What the user is primarily doing",
+  "secondary_activities": ["Activity 1", "Activity 2"],
+  "project_indicators": ["github.com/user/repo", "project-name", "file.py"],
+  "summary": "Concise description of the work activity (≤16 words)",
+  "coarse_task": "Coding|Research|Comms|Build|Test|Design|Meeting|Admin|Idle|Unknown",
+  "confidence": 0.0-1.0
+}}
+
+GUIDELINES:
+1. Identify ALL visible applications (not just the frontmost)
+2. For dual-pane/split screens, identify both sides
+3. Extract window titles from visible windows (not just menu bars)
+4. Distinguish between UI chrome (menus, toolbars) and actual content
+5. Identify project indicators: GitHub URLs, repo names, file paths, project names
+6. Primary activity should describe what the user is doing, not just the app name
+7. Confidence should reflect how clear the activity is from visual context
+8. If multiple apps visible, describe the primary focus{project_hint}
+
+Return ONLY valid JSON, no other text."""
     return prompt
 
 

@@ -183,3 +183,136 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
     return []
 
 
+def analyze_image_with_vision(cfg: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    """Analyze an image using LLM vision for holistic scene understanding.
+
+    Uses a vision-capable model to understand the entire screenshot scene,
+    identifying apps, windows, layout, activities, and projects. This is
+    the primary analysis method, with OCR used as supplemental context.
+
+    Args:
+        cfg: Configuration dictionary with Ollama settings.
+        path: Path to the image file.
+
+    Returns:
+        Dictionary with structured analysis results:
+        - apps_visible: List of all visible applications
+        - primary_app: Main application in focus
+        - window_titles: List of window titles visible
+        - primary_window_title: Main window title
+        - layout: Layout type (single-window, dual-pane, etc.)
+        - layout_description: Description of screen layout
+        - primary_activity: What user is primarily doing
+        - secondary_activities: List of secondary activities
+        - project_indicators: List of project/repo indicators found
+        - summary: Activity summary
+        - coarse_task: Task category
+        - confidence: Confidence score (0.0-1.0)
+        Returns empty dict if vision analysis fails or is disabled.
+    """
+    if not cfg.get("ollama", {}).get("enabled", False):
+        return {}
+
+    try:
+        import requests
+        import base64
+        import logging
+
+        logger = logging.getLogger("questlog")
+
+        vision_cfg = cfg.get("ollama", {}).get("vision_analysis", {})
+        # Fall back to OCR model if vision_analysis not configured
+        if not vision_cfg.get("model"):
+            vision_cfg = cfg.get("ollama", {}).get("ocr", {})
+
+        if not vision_cfg.get("model"):
+            return {}
+
+        # Check if vision analysis is enabled (default True)
+        if vision_cfg.get("enabled", True) is False:
+            return {}
+
+        endpoint_cfg = cfg["ollama"].get("endpoint", "http://localhost:11434")
+        def _join(u: str, path: str) -> str:
+            return u.rstrip("/") + path
+        gen_url = endpoint_cfg if endpoint_cfg.endswith("/api/generate") else _join(endpoint_cfg, "/api/generate")
+
+        model = vision_cfg.get("model")
+
+        # Check if model is available
+        try:
+            tags_url = gen_url.replace("/api/generate", "/api/tags")
+            tags = requests.get(tags_url, timeout=2)
+            names = set()
+            if tags.ok:
+                tj = tags.json()
+                listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
+                for m in listing or []:
+                    if isinstance(m, dict) and m.get("name"):
+                        names.add(m["name"])
+            if model not in names:
+                logger.debug("Vision model %s not available", model)
+                return {}  # Model not available
+        except Exception as e:
+            logger.debug("Failed to check vision model availability: %s", e)
+            return {}
+
+        # Build vision analysis prompt
+        from ql.text import build_vision_analysis_prompt
+        prompt = build_vision_analysis_prompt(cfg.get("projects", []))
+
+        # Encode image to base64 for Ollama API
+        with open(path, "rb") as img_file:
+            image_data = base64.b64encode(img_file.read()).decode("utf-8")
+
+        gen_payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "images": [image_data]
+        }
+
+        resp = requests.post(gen_url, json=gen_payload, timeout=60)
+        resp.raise_for_status()
+
+        response_text = (resp.json() or {}).get("response", "")
+        if not response_text:
+            return {}
+
+        # Try to parse JSON response
+        try:
+            # Extract JSON from response (might have markdown code blocks)
+            json_start = response_text.find("{")
+            json_end = response_text.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                json_text = response_text[json_start:json_end]
+                result = json.loads(json_text)
+                # Validate and normalize result
+                return {
+                    "apps_visible": result.get("apps_visible", []),
+                    "primary_app": result.get("primary_app", "Unknown"),
+                    "window_titles": result.get("window_titles", []),
+                    "primary_window_title": result.get("primary_window_title", "Unknown"),
+                    "layout": result.get("layout", "single-window"),
+                    "layout_description": result.get("layout_description", ""),
+                    "primary_activity": result.get("primary_activity", ""),
+                    "secondary_activities": result.get("secondary_activities", []),
+                    "project_indicators": result.get("project_indicators", []),
+                    "summary": result.get("summary", ""),
+                    "coarse_task": result.get("coarse_task", "Unknown"),
+                    "confidence": float(result.get("confidence", 0.5)),
+                }
+            else:
+                logger.warning("Vision analysis response contains no JSON")
+                return {}
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse vision analysis JSON: %s. Response: %s", e, response_text[:200])
+            return {}
+
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("questlog")
+        logger.debug("Vision analysis failed: %s", e)
+        return {}
+
+

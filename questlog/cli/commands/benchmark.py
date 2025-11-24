@@ -76,6 +76,47 @@ def _format_markdown(data: dict, image_path: Path) -> str:
         lines.append("```")
         lines.append("")
 
+    # Vision Analysis
+    vision_result = data.get('vision_result', {})
+    if vision_result:
+        lines.append("## Vision Analysis (Primary)")
+        lines.append("")
+        lines.append(f"- **Primary App:** {vision_result.get('primary_app', 'Unknown')}")
+        apps_visible = vision_result.get('apps_visible', [])
+        if apps_visible:
+            lines.append(f"- **Apps Visible:** {', '.join(apps_visible)}")
+        lines.append(f"- **Primary Window Title:** `{vision_result.get('primary_window_title', 'Unknown')}`")
+        window_titles = vision_result.get('window_titles', [])
+        if window_titles:
+            lines.append(f"- **Window Titles:** {', '.join([f'`{wt}`' for wt in window_titles])}")
+        lines.append(f"- **Layout:** {vision_result.get('layout', 'N/A')}")
+        layout_desc = vision_result.get('layout_description', '')
+        if layout_desc:
+            lines.append(f"- **Layout Description:** {layout_desc}")
+        lines.append(f"- **Primary Activity:** {vision_result.get('primary_activity', 'N/A')}")
+        secondary = vision_result.get('secondary_activities', [])
+        if secondary:
+            lines.append(f"- **Secondary Activities:** {', '.join(secondary)}")
+        project_indicators = vision_result.get('project_indicators', [])
+        if project_indicators:
+            # Handle both string and dict formats
+            indicator_strs = []
+            for ind in project_indicators:
+                if isinstance(ind, dict):
+                    if 'url' in ind:
+                        indicator_strs.append(ind['url'])
+                    elif 'name' in ind:
+                        indicator_strs.append(ind['name'])
+                    elif 'path' in ind:
+                        indicator_strs.append(ind['path'])
+                    else:
+                        indicator_strs.append(str(ind))
+                else:
+                    indicator_strs.append(str(ind))
+            lines.append(f"- **Project Indicators:** {', '.join(indicator_strs)}")
+        lines.append(f"- **Confidence:** {vision_result.get('confidence', 0.0):.2f}")
+        lines.append("")
+
     # App detection
     lines.append("## App Detection")
     lines.append("")
@@ -211,6 +252,49 @@ def _format_html(data: dict, image_path: Path) -> str:
             html.append(f"\n... and {len(ocr_filtered) - 20} more")
         html.append("</pre>")
 
+    # Vision Analysis
+    vision_result = data.get('vision_result', {})
+    if vision_result:
+        html.append("<h2>Vision Analysis (Primary)</h2>")
+        html.append("<table>")
+        html.append(f'<tr><th>Primary App</th><td>{vision_result.get("primary_app", "Unknown")}</td></tr>')
+        apps_visible = vision_result.get('apps_visible', [])
+        if apps_visible:
+            html.append(f'<tr><th>Apps Visible</th><td>{", ".join(apps_visible)}</td></tr>')
+        html.append(f'<tr><th>Primary Window Title</th><td><code>{vision_result.get("primary_window_title", "Unknown")}</code></td></tr>')
+        window_titles = vision_result.get('window_titles', [])
+        if window_titles:
+            html.append(f'<tr><th>Window Titles</th><td>{", ".join([f"<code>{wt}</code>" for wt in window_titles])}</td></tr>')
+        html.append(f'<tr><th>Layout</th><td>{vision_result.get("layout", "N/A")}</td></tr>')
+        layout_desc = vision_result.get('layout_description', '')
+        if layout_desc:
+            html.append(f'<tr><th>Layout Description</th><td>{layout_desc}</td></tr>')
+        html.append(f'<tr><th>Primary Activity</th><td>{vision_result.get("primary_activity", "N/A")}</td></tr>')
+        secondary = vision_result.get('secondary_activities', [])
+        if secondary:
+            html.append(f'<tr><th>Secondary Activities</th><td>{", ".join(secondary)}</td></tr>')
+        project_indicators = vision_result.get('project_indicators', [])
+        if project_indicators:
+            # Handle both string and dict formats
+            indicator_strs = []
+            for ind in project_indicators:
+                if isinstance(ind, dict):
+                    if 'url' in ind:
+                        indicator_strs.append(ind['url'])
+                    elif 'name' in ind:
+                        indicator_strs.append(ind['name'])
+                    elif 'path' in ind:
+                        indicator_strs.append(ind['path'])
+                    else:
+                        indicator_strs.append(str(ind))
+                else:
+                    indicator_strs.append(str(ind))
+            html.append(f'<tr><th>Project Indicators</th><td>{", ".join(indicator_strs)}</td></tr>')
+        conf = vision_result.get('confidence', 0.0)
+        badge_class = 'badge-success' if conf > 0.7 else 'badge-warning' if conf > 0.4 else 'badge-info'
+        html.append(f'<tr><th>Confidence</th><td><span class="badge {badge_class}">{conf:.2f}</span></td></tr>')
+        html.append("</table>")
+
     # App detection
     html.append("<h2>App Detection</h2>")
     html.append("<table>")
@@ -287,11 +371,15 @@ def _process_single_image(image_path: Path, cfg, image_service: ImageService) ->
     mtime = image_path.stat().st_mtime
     timestamp = dt.datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds")
 
-    # Extract OCR
+    # PRIMARY: Vision-based analysis
     import ql.system as qls
     from ql.text import redact, filter_ocr_cruft, extract_clues, find_artifacts
     import ql.processing as qlp
 
+    vision_result = qls.analyze_image_with_vision(cfg.to_dict(), image_path)
+    vision_available = bool(vision_result)
+
+    # SUPPLEMENTAL: Extract OCR
     max_ocr_lines = cfg.max_ocr_lines
     ocr_raw = qls.ocr_with_llm(cfg.to_dict(), image_path, max_ocr_lines)
     if not ocr_raw:
@@ -300,29 +388,50 @@ def _process_single_image(image_path: Path, cfg, image_service: ImageService) ->
     ocr_filtered = filter_ocr_cruft(ocr_raw)
     redacted = [redact(line) for line in ocr_filtered]
 
-    # Infer app and window title
-    window_title = "Unknown"
-    if redacted:
-        for line in redacted:
-            line_stripped = line.strip()
-            if line_stripped and len(line_stripped) > 3:
-                window_title = line_stripped[:80]
-                break
-
-    app = qlp.infer_app_from_content(window_title, redacted)
+    # Use vision results if available, otherwise infer from OCR
+    if vision_available:
+        app = vision_result.get("primary_app", "Unknown")
+        window_title = vision_result.get("primary_window_title", "Unknown")
+        detection_method = "vision_analysis"
+    else:
+        # Infer app and window title from OCR
+        window_title = "Unknown"
+        if redacted:
+            for line in redacted:
+                line_stripped = line.strip()
+                if line_stripped and len(line_stripped) > 3:
+                    window_title = line_stripped[:80]
+                    break
+        app = qlp.infer_app_from_content(window_title, redacted)
+        detection_method = "ocr_inference"
 
     # Extract clues
     clues = extract_clues(app, window_title, redacted)
+
+    # Merge vision project indicators with OCR clues
+    if vision_available and vision_result.get("project_indicators"):
+        vision_projects = vision_result.get("project_indicators", [])
+        for proj_indicator in vision_projects:
+            if "github.com" in proj_indicator or "http" in proj_indicator:
+                if "urls" not in clues:
+                    clues["urls"] = []
+                if proj_indicator not in clues["urls"]:
+                    clues["urls"].append(proj_indicator)
 
     # Resolve project
     proj_guess = qlp.resolve_project(
         cfg.projects, cfg.project_aliases, window_title, redacted, clues
     )
 
-    # Generate summary
-    summary, coarse_task, confidence = qlp.summarize(
-        cfg.to_dict(), app, window_title, redacted, proj_guess, clues
-    )
+    # Generate summary (use vision summary if available)
+    if vision_available and vision_result.get("summary"):
+        summary = vision_result.get("summary", "")
+        coarse_task = vision_result.get("coarse_task", "Unknown")
+        confidence = vision_result.get("confidence", 0.5)
+    else:
+        summary, coarse_task, confidence = qlp.summarize(
+            cfg.to_dict(), app, window_title, redacted, proj_guess, clues, vision_result if vision_available else None
+        )
 
     # Find artifacts
     artifacts = find_artifacts(window_title, redacted)
@@ -346,6 +455,7 @@ def _process_single_image(image_path: Path, cfg, image_service: ImageService) ->
         "file_path": str(image_path),
         "file_size": f"{image_path.stat().st_size:,} bytes",
         "timestamp": timestamp,
+        "vision_result": vision_result if vision_available else {},
         "ocr_raw": ocr_raw,
         "ocr_filtered": ocr_filtered,
         "app": app,

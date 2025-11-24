@@ -27,7 +27,7 @@ def setup_logging(cfg: QuestlogConfig, debug: bool = False) -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    
+
     # Also add console handler for debug mode
     if debug:
         console_handler = logging.StreamHandler()

@@ -191,7 +191,7 @@ def backfill(
     base = Path(cfg.base_folder)
     cutoff = None
     today_date = None
-    
+
     if today:
         today_date = dt.date.today().strftime("%Y-%m-%d")
         typer.echo(f"Processing only images from today: {today_date}")
@@ -215,21 +215,21 @@ def backfill(
                         if debug:
                             logger.debug("Skipping %s (not today's date: %s)", p.name, file_date)
                         continue
-                
+
                 # Filter by days cutoff if specified
                 if cutoff and p.stat().st_mtime < cutoff:
                     skipped += 1
                     continue
-                
+
                 if db_service.already_processed(conn, str(p)):
                     skipped += 1
                     if debug:
                         logger.debug("Skipping %s (already processed)", p.name)
                     continue
-                
+
                 if debug:
                     logger.debug("Processing: %s", p)
-                
+
                 # Historical screenshots: skip app detection, infer from content
                 image_service.process_image(conn, p, use_app_detection=False)
                 count += 1

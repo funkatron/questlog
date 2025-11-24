@@ -23,6 +23,13 @@ class OllamaSummarizationConfig(BaseModel):
     send_image: bool = Field(default=False, description="Whether to send image to summarization model")
 
 
+class OllamaVisionAnalysisConfig(BaseModel):
+    """Configuration for vision-based holistic image analysis."""
+
+    model: str = Field(default="", description="Vision model for scene understanding (defaults to OCR model if not set)")
+    enabled: bool = Field(default=True, description="Enable vision-based analysis as primary method")
+
+
 class OllamaConfig(BaseModel):
     """Ollama LLM configuration."""
 
@@ -33,6 +40,7 @@ class OllamaConfig(BaseModel):
     )
     ocr: OllamaOCRConfig = Field(default_factory=OllamaOCRConfig)
     summarization: OllamaSummarizationConfig = Field(default_factory=OllamaSummarizationConfig)
+    vision_analysis: OllamaVisionAnalysisConfig = Field(default_factory=OllamaVisionAnalysisConfig)
 
 
 class OpenAIConfig(BaseModel):

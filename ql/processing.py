@@ -110,7 +110,7 @@ def resolve_project(
     tokens = set(re.split(r"[\s/\\]+", search_text))
     tokens |= set(clues.get("domains", []))
     tokens |= set(clues.get("repo_tokens", []))
-    
+
     # Extract repo name from GitHub URLs (e.g., github.com/funkatron/questlog -> questlog)
     for url in clues.get("urls", []):
         github_match = re.search(r'github\.com/[^/]+/([^/]+)', url.lower())
@@ -121,7 +121,7 @@ def resolve_project(
             full_match = re.search(r'github\.com/([^/]+)/([^/]+)', url.lower())
             if full_match:
                 tokens.add(f"{full_match.group(1)}/{full_match.group(2)}")
-    
+
     # Also check OCR text directly for github.com URLs
     github_url_match = re.search(r'github\.com/([^/\s]+)/([^/\s]+)', search_text)
     if github_url_match:
@@ -162,11 +162,12 @@ def summarize(
     ocr_top: List[str],
     project_guess: Tuple[Optional[str], float],
     clues: Dict[str, Any],
+    vision_result: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str, float]:
     """Generate activity summary, task classification, and confidence score.
 
     Creates a concise summary of what the user was doing based on app context,
-    window title, and OCR content. Uses LLM if enabled for better quality,
+    window title, OCR content, and vision analysis. Uses LLM if enabled for better quality,
     with intelligent model selection and fallbacks.
 
     Args:
@@ -176,6 +177,7 @@ def summarize(
         ocr_top: Top OCR lines extracted from the screenshot.
         project_guess: Tuple of (project_name, confidence) from project resolution.
         clues: Dictionary of extracted clues (URLs, domains, tokens).
+        vision_result: Optional vision analysis result dictionary.
 
     Returns:
         Tuple of (summary, coarse_task, confidence) where:
@@ -183,9 +185,21 @@ def summarize(
         - coarse_task: Task category (Coding, Research, Comms, etc.).
         - confidence: Confidence score from 0.0 to 1.0.
     """
+    # If vision analysis provided summary, use it (already handled in process_image)
+    # This function is called as fallback when vision doesn't provide summary
 
     ocr_text = " ".join(ocr_top).lower()
     coarse_task = guess_task(app, ocr_text)
+
+    # Enhance with vision context if available
+    if vision_result:
+        vision_task = vision_result.get("coarse_task", "")
+        if vision_task and vision_task != "Unknown":
+            coarse_task = vision_task
+        vision_activity = vision_result.get("primary_activity", "")
+        if vision_activity:
+            # Use vision activity as additional context
+            logger.debug("Vision detected activity: %s", vision_activity)
 
     summ = window_title if window_title and window_title != "Unknown" else (ocr_top[0] if ocr_top else "")
     summ = summ.strip() or (f"{coarse_task} in {app}" if coarse_task != "Unknown" else f"Using {app}")
@@ -197,11 +211,16 @@ def summarize(
         conf += 0.15
     if clues.get("urls"):
         conf += 0.05
+    if vision_result:
+        # Boost confidence if vision analysis was successful
+        vision_conf = vision_result.get("confidence", 0.5)
+        conf = max(conf, vision_conf * 0.8)  # Use vision confidence as upper bound
     conf = min(conf, 0.95)
 
     if cfg.get("ollama", {}).get("enabled", False):
         try:
-            payload = build_ollama_prompt(cfg, app, window_title, ocr_top, cfg.get("projects", []), clues)
+            # Include vision context in prompt if available
+            payload = build_ollama_prompt(cfg, app, window_title, ocr_top, cfg.get("projects", []), clues, vision_result)
 
             endpoint_cfg = cfg["ollama"].get("endpoint", "http://localhost:11434")
             # Normalize URLs
@@ -313,7 +332,7 @@ def infer_app_from_content(window_title: str, ocr_lines: List[str]) -> str:
     # Check for Draw Things first (has distinctive UI elements)
     if any(indicator in combined_text for indicator in app_indicators["draw things"]):
         return "Draw Things"
-    
+
     # Check other apps
     for app_name, keywords in app_indicators.items():
         if app_name == "draw things":
@@ -345,6 +364,7 @@ def process_image(
 ) -> Optional[int]:
     """Process a screenshot image and create a database entry.
 
+    Uses vision-based analysis as primary method, with OCR as supplemental context.
     Extracts context from the image (app, window title, OCR text), generates
     a summary, and stores the entry in the database. Handles app blocklisting,
     window title fallback, and diagnostic logging.
@@ -362,20 +382,14 @@ def process_image(
     mtime = file_path.stat().st_mtime
     timestamp = dt.datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds")
 
-    # Try LLM-based OCR first, fall back to traditional OCR
-    max_ocr_lines = cfg.get("max_ocr_lines", 12)
-    ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
-    if not ocr_top_raw:
-        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
-    
-    # Log raw OCR output in debug mode
-    logger.debug("OCR raw (%d lines): %s", len(ocr_top_raw), ocr_top_raw[:10])
-    
-    # Filter out cruft (menu bars, UI elements, system stats, etc.)
-    ocr_filtered = filter_ocr_cruft(ocr_top_raw)
-    logger.debug("OCR filtered (%d lines): %s", len(ocr_filtered), ocr_filtered[:10])
-    
-    redacted = [redact(line) for line in ocr_filtered]
+    # PRIMARY: Vision-based analysis
+    vision_result = qls.analyze_image_with_vision(cfg, file_path)
+    vision_available = bool(vision_result)
+
+    if vision_available:
+        logger.debug("Vision analysis successful: %s", vision_result.get("primary_app", "Unknown"))
+    else:
+        logger.debug("Vision analysis unavailable, falling back to OCR-based flow")
 
     # App and window title detection
     if use_app_detection:
@@ -387,13 +401,39 @@ def process_image(
             logger.info("skipping blocklisted app: %s", app)
             return None
     else:
-        # For historical screenshots, infer from content
-        app = "Unknown"
-        window_title = "Unknown"
+        # For historical screenshots, use vision analysis if available
+        if vision_available:
+            app = vision_result.get("primary_app", "Unknown")
+            window_title = vision_result.get("primary_window_title", "Unknown")
+            # If vision found multiple apps, prefer the primary
+            if vision_result.get("apps_visible"):
+                logger.debug("Vision detected apps: %s", vision_result.get("apps_visible"))
+        else:
+            app = "Unknown"
+            window_title = "Unknown"
 
-    # Improve window title if it's Unknown - use first meaningful OCR line
-    # Skip system stats/overlays (GPU, CPU, memory stats)
-    if window_title == "Unknown" and redacted:
+    # SUPPLEMENTAL: OCR for additional text context
+    max_ocr_lines = cfg.get("max_ocr_lines", 12)
+    ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
+    if not ocr_top_raw:
+        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
+
+    # Log raw OCR output in debug mode
+    logger.debug("OCR raw (%d lines): %s", len(ocr_top_raw), ocr_top_raw[:10])
+
+    # Filter out cruft (menu bars, UI elements, system stats, etc.)
+    ocr_filtered = filter_ocr_cruft(ocr_top_raw)
+    logger.debug("OCR filtered (%d lines): %s", len(ocr_filtered), ocr_filtered[:10])
+
+    redacted = [redact(line) for line in ocr_filtered]
+
+    # MERGE: Combine vision analysis with OCR
+    # If vision provided window title, use it (unless it's Unknown)
+    if vision_available and vision_result.get("primary_window_title") != "Unknown":
+        window_title = vision_result.get("primary_window_title", window_title)
+        logger.debug("Using vision-provided window title: %s", window_title[:40])
+    elif window_title == "Unknown" and redacted:
+        # Fallback: Improve window title from OCR if still Unknown
         for line in redacted:
             line_stripped = line.strip()
             # Skip lines that look like system stats
@@ -405,7 +445,7 @@ def process_image(
                 window_title = line_stripped[:80]  # Reasonable max length
                 logger.debug("Using OCR fallback for window title: %s", window_title[:40])
                 break
-    
+
     # Clean up window title if it looks like system stats (even if not "Unknown")
     if window_title and window_title != "Unknown":
         if re.search(r'\b(gpu|cpu|mem|ram|fs|loa|pu)\b', window_title, re.IGNORECASE) and len(re.findall(r'\d', window_title)) > 2:
@@ -431,27 +471,38 @@ def process_image(
     if app == "Unknown" and not use_app_detection:
         app = infer_app_from_content(window_title, redacted)
 
-    # Try LLM-based OCR first, fall back to traditional OCR
-    max_ocr_lines = cfg.get("max_ocr_lines", 12)
-    ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
-    if not ocr_top_raw:
-        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
-    redacted = [redact(line) for line in ocr_top_raw]
-
-    # Improve window title if it's Unknown - use first meaningful OCR line
-    if window_title == "Unknown" and redacted:
-        for line in redacted:
-            line_stripped = line.strip()
-            if line_stripped and len(line_stripped) > 3:
-                window_title = line_stripped[:80]  # Reasonable max length
-                logger.debug("Using OCR fallback for window title: %s", window_title[:40])
-                break
-
+    # Merge vision project indicators with OCR clues
     clues = extract_clues(app, window_title, redacted)
+    if vision_available and vision_result.get("project_indicators"):
+        # Add vision-detected project indicators to clues
+        vision_projects = vision_result.get("project_indicators", [])
+        for proj_indicator in vision_projects:
+            if "github.com" in proj_indicator or "http" in proj_indicator:
+                if "urls" not in clues:
+                    clues["urls"] = []
+                if proj_indicator not in clues["urls"]:
+                    clues["urls"].append(proj_indicator)
+            else:
+                # Could be a project name or token
+                if "tokens" not in clues:
+                    clues["tokens"] = []
+                if proj_indicator not in clues["tokens"]:
+                    clues["tokens"].append(proj_indicator)
+        logger.debug("Merged vision project indicators: %s", vision_projects)
+
     proj_guess = resolve_project(
         cfg.get("projects", []), cfg.get("project_aliases", {}), window_title, redacted, clues
     )
-    summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues)
+
+    # Use vision summary if available, otherwise generate one
+    if vision_available and vision_result.get("summary"):
+        summary = vision_result.get("summary", "")
+        coarse_task = vision_result.get("coarse_task", "Unknown")
+        confidence = vision_result.get("confidence", 0.5)
+        logger.debug("Using vision-provided summary: %s (task=%s, conf=%.2f)", summary, coarse_task, confidence)
+    else:
+        summary, coarse_task, confidence = summarize(cfg, app, window_title, redacted, proj_guess, clues, vision_result if vision_available else None)
+
     artifacts = find_artifacts(window_title, redacted)
 
     # Diagnostic logging for Unknown entries
