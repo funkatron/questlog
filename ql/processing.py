@@ -19,7 +19,7 @@ import requests
 
 from ql import db as qldb
 from ql import system as qls
-from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt
+from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt, filter_ocr_cruft
 
 
 logger = logging.getLogger("questlog")
@@ -110,6 +110,23 @@ def resolve_project(
     tokens = set(re.split(r"[\s/\\]+", search_text))
     tokens |= set(clues.get("domains", []))
     tokens |= set(clues.get("repo_tokens", []))
+    
+    # Extract repo name from GitHub URLs (e.g., github.com/funkatron/questlog -> questlog)
+    for url in clues.get("urls", []):
+        github_match = re.search(r'github\.com/[^/]+/([^/]+)', url.lower())
+        if github_match:
+            repo_name = github_match.group(1)
+            tokens.add(repo_name)
+            # Also add owner/repo combo
+            full_match = re.search(r'github\.com/([^/]+)/([^/]+)', url.lower())
+            if full_match:
+                tokens.add(f"{full_match.group(1)}/{full_match.group(2)}")
+    
+    # Also check OCR text directly for github.com URLs
+    github_url_match = re.search(r'github\.com/([^/\s]+)/([^/\s]+)', search_text)
+    if github_url_match:
+        tokens.add(github_url_match.group(2))  # repo name
+        tokens.add(f"{github_url_match.group(1)}/{github_url_match.group(2)}")  # owner/repo
 
     best_match_name = None
     best_match_score = 0.0
@@ -260,12 +277,71 @@ def summarize(
     return summ[:160], coarse_task, float(f"{conf:.2f}")
 
 
+def infer_app_from_content(window_title: str, ocr_lines: List[str]) -> str:
+    """Infer application name from window title and OCR content.
+
+    Uses heuristics to guess the application based on window title patterns
+    and OCR text content (menu bars, UI elements, etc.).
+
+    Args:
+        window_title: Window title text.
+        ocr_lines: OCR-extracted text lines.
+
+    Returns:
+        Inferred application name, or "Unknown" if no match.
+    """
+    combined_text = " ".join([window_title] + ocr_lines).lower()
+
+    # Check for app indicators in OCR (menu bars, UI elements)
+    app_indicators = {
+        "safari": ["safari", "file edit view history bookmarks"],
+        "chrome": ["chrome", "google chrome"],
+        "firefox": ["firefox", "mozilla"],
+        "cursor": ["cursor", "cursor editor"],
+        "code": ["visual studio code", "code", "vscode"],
+        "terminal": ["terminal", "iterm", "zsh", "bash"],
+        "slack": ["slack"],
+        "discord": ["discord"],
+        "mail": ["mail", "apple mail"],
+        "notes": ["notes"],
+        "figma": ["figma"],
+        "obsidian": ["obsidian"],
+        "draw things": ["drawthings", "draw things", "edit image view window help", "version history", "local network"],
+        "github": ["github.com", "github", "repository", "pull request", "issue"],
+    }
+
+    # Check for Draw Things first (has distinctive UI elements)
+    if any(indicator in combined_text for indicator in app_indicators["draw things"]):
+        return "Draw Things"
+    
+    # Check other apps
+    for app_name, keywords in app_indicators.items():
+        if app_name == "draw things":
+            continue  # Already checked
+        if any(keyword in combined_text for keyword in keywords):
+            return app_name.title()
+
+    # Check window title for common patterns
+    title_lower = window_title.lower()
+    if ".py" in title_lower or ".js" in title_lower or ".ts" in title_lower or ".md" in title_lower:
+        if "cursor" in title_lower or "github.com" in combined_text:
+            return "Cursor"
+        return "Code"
+    if "terminal" in title_lower or "iterm" in title_lower:
+        return "Terminal"
+    if "github.com" in combined_text or "repository" in combined_text:
+        return "GitHub"
+    if "readme" in combined_text and ("github" in combined_text or ".md" in combined_text):
+        return "Cursor"  # Likely viewing README in Cursor/VS Code
+
+    return "Unknown"
+
+
 def process_image(
     conn: Any,  # sqlite3.Connection, avoiding circular import
     cfg: Dict[str, Any],
     file_path: Path,
-    frontapp_bin: Path,
-    ocr_bin: Path,
+    use_app_detection: bool = True,
 ) -> Optional[int]:
     """Process a screenshot image and create a database entry.
 
@@ -277,8 +353,8 @@ def process_image(
         conn: SQLite database connection.
         cfg: Configuration dictionary.
         file_path: Path to the screenshot image file.
-        frontapp_bin: Path to the Swift frontapp binary.
-        ocr_bin: Path to the Swift OCR binary.
+        use_app_detection: If True, detect current frontmost app. If False,
+            infer app from OCR/window title (for historical screenshots).
 
     Returns:
         Entry ID if successfully processed, None if skipped (blocklisted app).
@@ -286,20 +362,80 @@ def process_image(
     mtime = file_path.stat().st_mtime
     timestamp = dt.datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds")
 
-    meta = qls.front_app_info(frontapp_bin)
-    app = meta.get("app", "Unknown")
-    blocklist = cfg.get("blocklist_apps") or []
-    if app in blocklist:
-        logger.info("skipping blocklisted app: %s", app)
-        return None
+    # Try LLM-based OCR first, fall back to traditional OCR
+    max_ocr_lines = cfg.get("max_ocr_lines", 12)
+    ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
+    if not ocr_top_raw:
+        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
+    
+    # Log raw OCR output in debug mode
+    logger.debug("OCR raw (%d lines): %s", len(ocr_top_raw), ocr_top_raw[:10])
+    
+    # Filter out cruft (menu bars, UI elements, system stats, etc.)
+    ocr_filtered = filter_ocr_cruft(ocr_top_raw)
+    logger.debug("OCR filtered (%d lines): %s", len(ocr_filtered), ocr_filtered[:10])
+    
+    redacted = [redact(line) for line in ocr_filtered]
 
-    window_title = meta.get("window_title", "Unknown")
+    # App and window title detection
+    if use_app_detection:
+        meta = qls.front_app_info()
+        app = meta.get("app", "Unknown")
+        window_title = meta.get("window_title", "Unknown")
+        blocklist = cfg.get("blocklist_apps") or []
+        if app in blocklist:
+            logger.info("skipping blocklisted app: %s", app)
+            return None
+    else:
+        # For historical screenshots, infer from content
+        app = "Unknown"
+        window_title = "Unknown"
+
+    # Improve window title if it's Unknown - use first meaningful OCR line
+    # Skip system stats/overlays (GPU, CPU, memory stats)
+    if window_title == "Unknown" and redacted:
+        for line in redacted:
+            line_stripped = line.strip()
+            # Skip lines that look like system stats
+            if re.search(r'\b(gpu|cpu|mem|ram|fs|loa|pu)\b', line_stripped, re.IGNORECASE) and len(re.findall(r'\d', line_stripped)) > 2:
+                continue
+            if re.match(r'^[\d\s\.]+$', line_stripped) and len(line_stripped) < 30:
+                continue
+            if line_stripped and len(line_stripped) > 3:
+                window_title = line_stripped[:80]  # Reasonable max length
+                logger.debug("Using OCR fallback for window title: %s", window_title[:40])
+                break
+    
+    # Clean up window title if it looks like system stats (even if not "Unknown")
+    if window_title and window_title != "Unknown":
+        if re.search(r'\b(gpu|cpu|mem|ram|fs|loa|pu)\b', window_title, re.IGNORECASE) and len(re.findall(r'\d', window_title)) > 2:
+            # Try to find a better window title from filtered OCR
+            for line in redacted[:10]:
+                line_stripped = line.strip()
+                # Skip system stats
+                if re.search(r'\b(gpu|cpu|mem|ram|fs|loa|pu)\b', line_stripped, re.IGNORECASE) and len(re.findall(r'\d', line_stripped)) > 2:
+                    continue
+                if re.match(r'^[\d\s\.]+$', line_stripped) and len(line_stripped) < 30:
+                    continue
+                # Prefer lines with actual content (files, URLs, readable text)
+                if line_stripped and len(line_stripped) > 5:
+                    # Prefer lines that look like file names, URLs, or readable text
+                    if re.search(r'\.(md|py|js|ts|yaml|yml|json)', line_stripped) or \
+                       re.search(r'github\.com', line_stripped) or \
+                       len(re.findall(r'[a-zA-Z]', line_stripped)) > len(re.findall(r'\d', line_stripped)):
+                        window_title = line_stripped[:80]
+                        logger.debug("Replaced system stats window title with: %s", window_title[:40])
+                        break
+
+    # Infer app from content if we didn't detect it
+    if app == "Unknown" and not use_app_detection:
+        app = infer_app_from_content(window_title, redacted)
 
     # Try LLM-based OCR first, fall back to traditional OCR
     max_ocr_lines = cfg.get("max_ocr_lines", 12)
     ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
     if not ocr_top_raw:
-        ocr_top_raw = qls.ocr_lines(ocr_bin, file_path, max_ocr_lines)
+        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
     redacted = [redact(line) for line in ocr_top_raw]
 
     # Improve window title if it's Unknown - use first meaningful OCR line

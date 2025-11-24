@@ -1,10 +1,11 @@
-base_folder: "/Users/coj/Library/Containers/com.timesnapper.TimeSnapper/Data/Images"
+base_folder: "/Volumes/T7-1TB/TimeSnapper-imgs"
 
 projects:
   - "WBD Prototype"
   - "PEGASAS"
   - "Geocodio"
   - "OSMI"
+  - "questlog"
 
 # Per-project aliases improve resolution (tokens, repo names, Jira keys, domains, etc.).
 # Add whatever you commonly see in titles/URLs.
@@ -12,7 +13,8 @@ project_aliases:
   "WBD Prototype": ["wbd", "wbd-prototype", "neo", "adjuster", "aj", "snowflake", "okta"]
   "PEGASAS": ["pegasas", "pegasas-silex", "pegasas.aero", "silex"]
   "Geocodio": ["geocodio", "geocod.io", "api.geocod.io"]
-  "OSMI": ["osmi", "osmihelp.org", "mental health", "handbook", "questlog"]
+  "OSMI": ["osmi", "osmihelp.org", "mental health", "handbook"]
+  "questlog": ["questlog", "funkatron/questlog", "github.com/funkatron/questlog"]
 
 blocklist_apps:
   - "1Password"

@@ -179,37 +179,71 @@ def watch() -> None:
 @app.command()
 def backfill(
     days: Optional[int] = typer.Option(None, "--days", "-d", help="Only process last N days"),
+    today: bool = typer.Option(False, "--today", help="Only process today's images"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging and show OCR output"),
 ) -> None:
     """Scan historical screenshots and index them."""
     cfg = load_config()
-    setup_logging(cfg)
+    setup_logging(cfg, debug=debug)
     db_service = DatabaseService()
     image_service = ImageService(cfg)
 
     base = Path(cfg.base_folder)
     cutoff = None
-    if days is not None:
+    today_date = None
+    
+    if today:
+        today_date = dt.date.today().strftime("%Y-%m-%d")
+        typer.echo(f"Processing only images from today: {today_date}")
+    elif days is not None:
         cutoff = time.time() - (days * 86400)
+        typer.echo(f"Processing images from last {days} days")
 
     db_service.ensure_schema()
 
     with db_service.connect() as conn:
         count = 0
+        skipped = 0
         for p in sorted(image_service.iter_images(base)):
             try:
+                # Filter by today's date if requested
+                if today_date:
+                    # Check if file is in today's date folder
+                    file_date = p.parent.name
+                    if file_date != today_date:
+                        skipped += 1
+                        if debug:
+                            logger.debug("Skipping %s (not today's date: %s)", p.name, file_date)
+                        continue
+                
+                # Filter by days cutoff if specified
                 if cutoff and p.stat().st_mtime < cutoff:
+                    skipped += 1
                     continue
+                
                 if db_service.already_processed(conn, str(p)):
+                    skipped += 1
+                    if debug:
+                        logger.debug("Skipping %s (already processed)", p.name)
                     continue
-                image_service.process_image(conn, p)
+                
+                if debug:
+                    logger.debug("Processing: %s", p)
+                
+                # Historical screenshots: skip app detection, infer from content
+                image_service.process_image(conn, p, use_app_detection=False)
                 count += 1
-                if count % 50 == 0:
+                if debug:
+                    typer.echo(f"✓ Processed {p.name} ({count} total)")
+                elif count % 50 == 0:
                     typer.echo(f"Processed {count} files...")
             except Exception as e:
                 logger.error("backfill error on %s: %s", p, e)
+                if debug:
+                    typer.echo(f"✗ Error processing {p.name}: {e}", err=True)
 
         typer.echo(
-            f"Backfill complete. Processed {count} new screenshots. "
+            f"Backfill complete. Processed {count} new screenshots, skipped {skipped}. "
             f"See {cfg.logfile} for details."
         )
 
