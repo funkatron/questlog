@@ -305,10 +305,18 @@ def backfill(
             now = time.monotonic()
             if now - last_heartbeat >= _BACKFILL_HEARTBEAT_SEC:
                 elapsed = now - started
-                rate = scanned / elapsed if elapsed > 0 else 0.0
-                typer.echo(
-                    f"  ... {elapsed:.0f}s  scanned={scanned}  new={count}  skipped={skipped}  ({rate:.0f} files/s)"
-                )
+                scan_rate = scanned / elapsed if elapsed > 0 else 0.0
+                rate_fmt = f"{scan_rate:.2f}" if scan_rate < 1 else f"{scan_rate:.1f}"
+                parts = [
+                    f"  ... {elapsed:.0f}s",
+                    f"scanned={scanned}",
+                    f"new={count}",
+                    f"skipped={skipped}",
+                    f"{rate_fmt} scanned/s",
+                ]
+                if count > 0:
+                    parts.append(f"~{elapsed / count:.0f}s avg per new")
+                typer.echo("  ".join(parts))
                 last_heartbeat = now
 
         total_s = time.monotonic() - started
