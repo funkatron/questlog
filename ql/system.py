@@ -7,6 +7,7 @@ with fallbacks for when native helpers are unavailable.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any
@@ -21,13 +22,26 @@ except ImportError:
 # EasyOCR with caching - load model once and reuse
 _easyocr_reader = None
 
+def _easyocr_use_gpu() -> bool:
+    """Whether EasyOCR should use CUDA/MPS. Set QUESTLOG_EASYOCR_GPU=0 to force CPU."""
+    v = os.environ.get("QUESTLOG_EASYOCR_GPU", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def _get_easyocr_reader():
     """Get or create cached EasyOCR reader instance."""
     global _easyocr_reader
     if _easyocr_reader is None:
         try:
             import easyocr
-            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
+
+            use_gpu = _easyocr_use_gpu()
+            # EasyOCR picks cuda → mps → cpu when gpu=True (see easyocr.Reader).
+            _easyocr_reader = easyocr.Reader(
+                ["en"],
+                gpu=use_gpu,
+                verbose=False,
+            )
         except ImportError:
             return None
     return _easyocr_reader

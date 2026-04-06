@@ -28,6 +28,25 @@ def doctor() -> None:
     image_service = ImageService(cfg)
 
     typer.echo("== QuestLog Doctor ==")
+    try:
+        import torch
+
+        if os.environ.get("QUESTLOG_EASYOCR_GPU", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            typer.echo("  [i] QUESTLOG_EASYOCR_GPU is off — EasyOCR uses CPU")
+        elif torch.cuda.is_available():
+            typer.echo("  PyTorch: CUDA — EasyOCR will use GPU")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            typer.echo("  PyTorch: MPS — EasyOCR will use Apple GPU")
+        else:
+            typer.echo("  PyTorch: no CUDA/MPS — EasyOCR falls back to CPU")
+    except ImportError:
+        typer.echo("  [i] PyTorch not installed — GPU status unknown")
+
     typer.echo(f"Base folder: {cfg.base_folder}")
     base = Path(cfg.base_folder)
     if not base.exists():
