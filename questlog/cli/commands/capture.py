@@ -2,10 +2,11 @@
 
 import datetime as dt
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import typer
 from watchdog.observers import Observer
@@ -18,6 +19,55 @@ logger = logging.getLogger("questlog")
 
 # Create command group
 app = typer.Typer(name="capture", help="Screenshot capture commands")
+
+_BACKFILL_HEARTBEAT_SEC = 10.0
+
+
+def _iter_backfill_images(
+    base: Path,
+    *,
+    today_date: Optional[str],
+    days: Optional[int],
+    image_service: ImageService,
+) -> Iterator[Path]:
+    """Yield image paths for backfill.
+
+    When ``--days`` or ``--today`` is used, only walks TimeSnapper-style
+    ``YYYY-MM-DD`` folders under ``base`` so we do not scan the entire archive.
+    Falls back to a full recursive walk if no matching day folders exist.
+    """
+    if today_date:
+        day_dir = base / today_date
+        if not day_dir.is_dir():
+            typer.echo(f"  [!] No folder for today ({today_date}) under base_folder.")
+            return
+        for root, _dirs, files in os.walk(day_dir):
+            for name in files:
+                p = Path(root) / name
+                if p.suffix.lower() in IMAGE_EXTS:
+                    yield p
+        return
+
+    if days is not None:
+        day_roots: list[Path] = []
+        for i in range(days):
+            label = (dt.date.today() - dt.timedelta(days=i)).isoformat()
+            p = base / label
+            if p.is_dir():
+                day_roots.append(p)
+        if day_roots:
+            for day_dir in day_roots:
+                for root, _dirs, files in os.walk(day_dir):
+                    for name in files:
+                        p = Path(root) / name
+                        if p.suffix.lower() in IMAGE_EXTS:
+                            yield p
+            return
+        typer.echo(
+            "  [i] No YYYY-MM-DD day folders in range; scanning full tree under base_folder."
+        )
+
+    yield from image_service.iter_images(base)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 
@@ -201,14 +251,24 @@ def backfill(
 
     db_service.ensure_schema()
 
+    started = time.monotonic()
+    last_heartbeat = started
+
     with db_service.connect() as conn:
         count = 0
         skipped = 0
-        for p in sorted(image_service.iter_images(base)):
+        scanned = 0
+
+        for p in _iter_backfill_images(
+            base,
+            today_date=today_date if today else None,
+            days=days if not today else None,
+            image_service=image_service,
+        ):
+            scanned += 1
             try:
-                # Filter by today's date if requested
+                # Filter by today's date if requested (only when scanning full tree)
                 if today_date:
-                    # Check if file is in today's date folder
                     file_date = p.parent.name
                     if file_date != today_date:
                         skipped += 1
@@ -216,7 +276,7 @@ def backfill(
                             logger.debug("Skipping %s (not today's date: %s)", p.name, file_date)
                         continue
 
-                # Filter by days cutoff if specified
+                # Filter by days cutoff if specified (full-tree fallback or edge cases)
                 if cutoff and p.stat().st_mtime < cutoff:
                     skipped += 1
                     continue
@@ -236,14 +296,24 @@ def backfill(
                 if debug:
                     typer.echo(f"✓ Processed {p.name} ({count} total)")
                 elif count % 50 == 0:
-                    typer.echo(f"Processed {count} files...")
+                    typer.echo(f"Processed {count} new files...")
             except Exception as e:
                 logger.error("backfill error on %s: %s", p, e)
                 if debug:
                     typer.echo(f"✗ Error processing {p.name}: {e}", err=True)
 
+            now = time.monotonic()
+            if now - last_heartbeat >= _BACKFILL_HEARTBEAT_SEC:
+                elapsed = now - started
+                rate = scanned / elapsed if elapsed > 0 else 0.0
+                typer.echo(
+                    f"  ... {elapsed:.0f}s  scanned={scanned}  new={count}  skipped={skipped}  ({rate:.0f} files/s)"
+                )
+                last_heartbeat = now
+
+        total_s = time.monotonic() - started
         typer.echo(
-            f"Backfill complete. Processed {count} new screenshots, skipped {skipped}. "
-            f"See {cfg.logfile} for details."
+            f"Backfill complete in {total_s:.1f}s. Processed {count} new screenshots, skipped {skipped} "
+            f"(scanned {scanned}). See {cfg.logfile} for details."
         )
 
