@@ -48,6 +48,7 @@ all = [
     "pytest-cov>=4.0.0",
     "Pillow",
     "pytesseract",
+    "easyocr",
 ]
 
 [project.scripts]

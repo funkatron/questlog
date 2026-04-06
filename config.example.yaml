@@ -1,0 +1,40 @@
+# Folder where screenshots are stored (or watched)
+base_folder: "~/Screenshots"
+
+# Your projects (for automatic classification)
+projects:
+  - "Project A"
+  - "Project B"
+
+# Aliases help match projects from window titles/URLs
+project_aliases:
+  "Project A": ["project-a", "pa", "repo-name"]
+  "Project B": ["project-b", "pb"]
+
+# Apps to skip (privacy-sensitive)
+blocklist_apps:
+  - "1Password"
+  - "Messages"
+
+# Ollama configuration (optional)
+ollama:
+  enabled: true
+  endpoint: "http://localhost:11434/api/generate"
+
+  ocr:
+    model: "llava:7b"  # Vision model for text extraction (used if LLM OCR enabled)
+
+  summarization:
+    model: "tinydolphin:latest"  # Text model for summaries
+
+  # Vision Analysis - for holistic scene understanding (primary analysis method)
+  vision_analysis:
+    model: "llava:7b"  # Vision model for scene understanding
+    enabled: true  # Enable vision-first analysis
+
+# OpenAI configuration (optional, alternative to Ollama)
+openai:
+  enabled: false
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+

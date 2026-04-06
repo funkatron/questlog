@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -139,11 +140,12 @@ class QuestlogConfig(BaseModel):
         return cls(**data)
 
 
-def load_config(config_path: Path | str | None = None) -> QuestlogConfig:
+def load_config(config_path: Path | str | None = None, auto_create: bool = False) -> QuestlogConfig:
     """Load configuration from file.
 
     Args:
         config_path: Optional path to config file. Defaults to "config.yaml" in current directory.
+        auto_create: If True, create config.yaml from config.example.yaml if it doesn't exist.
 
     Returns:
         Validated QuestlogConfig instance.
@@ -152,6 +154,16 @@ def load_config(config_path: Path | str | None = None) -> QuestlogConfig:
         config_path = Path("config.yaml")
     elif isinstance(config_path, str):
         config_path = Path(config_path)
+
+    # Auto-create config from example if requested and config doesn't exist
+    if auto_create and not config_path.exists():
+        example_path = config_path.parent / "config.example.yaml"
+        if example_path.exists():
+            shutil.copy2(example_path, config_path)
+        else:
+            raise FileNotFoundError(
+                f"Config file not found: {config_path} and config.example.yaml not found to create it"
+            )
 
     return QuestlogConfig.from_file(config_path)
 

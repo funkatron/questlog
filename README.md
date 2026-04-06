@@ -24,32 +24,37 @@ Questlog logs your computer activity by analyzing periodic screenshots. It uses 
 ### Installation
 
 1. Clone or download this repository
-2. Install dependencies:
+2. Run the install helper:
+
+```bash
+make install
+```
+
+This will automatically:
+- Detect if `uv` is available and use it (recommended), otherwise fall back to `pip`
+- Install all dependencies including OCR and dev tools
+- Initialize the database
+- Create `config.yaml` from `config.example.yaml` if it doesn't exist
+
+**Alternative manual installation:**
+
+If you prefer to install manually or don't have `make`:
 
 ```bash
 # Using uv (recommended)
-uv sync                    # Core dependencies
-uv sync --extra ocr        # Include OCR (EasyOCR, Pillow, pytesseract)
-uv sync --extra dev        # Include dev tools (pytest, etc.)
-uv sync --all-extras       # Everything
+uv sync --all-extras
+uv run questlog init-db
 
 # Or using pip
-pip install -e .           # Core dependencies only
-pip install -e ".[ocr]"    # With OCR (EasyOCR recommended for best quality)
-pip install -e ".[dev]"    # With dev tools
-pip install -e ".[all]"    # Everything
+pip install -e ".[all]"
+python -m questlog init-db
 ```
 
 **Note:** EasyOCR is recommended for best OCR quality. It uses deep learning models and provides much better text extraction than Tesseract. The model is cached after first load for performance.
 
-3. Initialize the database:
+3. Configure:
 
-```bash
-uv run questlog init-db
-# or: python -m questlog init-db
-```
-
-5. Create a `config.yaml` file (see Configuration below)
+Edit `config.yaml` to set your screenshot folder, projects, and optional LLM settings (see Configuration below). The config file is automatically created from `config.example.yaml` during `init-db` if it doesn't exist.
 
 ### First capture
 
@@ -57,18 +62,18 @@ Test the setup:
 
 ```bash
 # Check your configuration
-uv run questlog doctor
+questlog doctor
 
 # Capture and analyze one screenshot
-uv run questlog snap
+questlog snap
 
 # View the analysis without saving
-uv run questlog analyze-now
+questlog analyze-now
 ```
 
 ## Configuration
 
-Create a `config.yaml` file in the project directory:
+Copy `config.example.yaml` to `config.yaml` and edit as needed:
 
 ```yaml
 # Folder where screenshots are stored (or watched)

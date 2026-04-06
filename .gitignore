@@ -15,6 +15,11 @@ venv/
 # Editors/IDE
 .vscode/
 .idea/
+.cursor/worktrees.json
+
+# Local configuration (use config.example.yaml as template)
+config.yaml
+config.yaml.backup
 
 # Logs
 *.log

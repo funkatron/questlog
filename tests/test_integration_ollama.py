@@ -1,9 +1,22 @@
-import json
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import pytest
 import requests
 import yaml
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_config_dict() -> dict:
+    for name in ("config.yaml", "config.example.yaml"):
+        path = _REPO_ROOT / name
+        if path.is_file():
+            with path.open() as f:
+                data = yaml.safe_load(f)
+            if isinstance(data, dict):
+                return data
+    pytest.skip("No config.yaml or config.example.yaml in repository root")
 
 
 def _tags_endpoint(generate_url: str) -> str:
@@ -13,7 +26,7 @@ def _tags_endpoint(generate_url: str) -> str:
 
 
 def test_ollama_running_and_generate_small():
-    cfg = yaml.safe_load(open("config.yaml"))
+    cfg = _load_config_dict()
     oll = cfg.get("ollama", {})
     endpoint = oll.get("endpoint", "http://localhost:11434/api/generate")
     
