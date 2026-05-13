@@ -1,6 +1,22 @@
 # Questlog
 
-Questlog logs your computer activity by analyzing periodic screenshots. It uses OCR to extract text from screenshots and optional LLM assistance to generate summaries of what you were doing.
+Questlog is a local-first restart tool. It analyzes recent screenshots so you can recover what you were doing after an interruption and get a short, neutral next-step note.
+
+It uses OCR to extract text from screenshots and optional LLM assistance to generate summaries. The first useful workflow is re-entry:
+
+```bash
+questlog resume
+```
+
+`resume` reads recent local database entries and prints a concise restart note with the last thread, possible open loops, context switches, and a suggested restart point. It does not require Ollama or OpenAI.
+
+## Privacy model
+
+- Questlog captures screenshots only when you run capture/watch/backfill commands.
+- Questlog stores metadata, OCR-derived text, summaries, confidence, and screenshot file paths in local SQLite.
+- User-facing restart notes apply extra redaction for emails, phone numbers, long card-like numbers, secret assignments, and URL query strings.
+- Data stays local unless you explicitly enable an LLM provider that sends prompts or images outside the process.
+- Use `blocklist_apps` in `config.yaml` for sensitive apps such as password managers or private messaging tools.
 
 ## What it does
 
@@ -10,7 +26,7 @@ Questlog logs your computer activity by analyzing periodic screenshots. It uses 
 4. **Identifies context** like visible apps, window titles, layout, activities, and projects
 5. **Generates summaries** using local LLM (Ollama) or cloud API (OpenAI) if enabled
 6. **Stores entries** in a SQLite database with timestamps, app names, tasks, and summaries
-7. **Exports logs** as Markdown or CSV for review
+7. **Builds restart notes** for recent activity and exports logs as Markdown or CSV for review
 
 ## Quickstart
 
@@ -69,6 +85,9 @@ questlog snap
 
 # View the analysis without saving
 questlog analyze-now
+
+# Recover recent context after an interruption
+questlog resume
 ```
 
 ## Configuration
@@ -93,6 +112,9 @@ project_aliases:
 blocklist_apps:
   - "1Password"
   - "Messages"
+
+# Matching below this score is treated as Unknown instead of guessed
+project_match_threshold: 0.70
 
 # Ollama configuration (optional)
 ollama:
@@ -119,6 +141,21 @@ openai:
 
 ## Usage
 
+### Resume recent work
+
+**Restart note for the last 4 hours:**
+```bash
+questlog resume
+```
+
+**Use a different window or structured output:**
+```bash
+questlog resume --hours 8
+questlog resume --json
+```
+
+The resume command is heuristic and local. It reads existing database entries and does not require an LLM.
+
 ### Capture modes
 
 **Single capture:**
@@ -142,7 +179,15 @@ Processes new screenshots as they appear in the configured folder.
 questlog backfill
 # Or only recent days:
 questlog backfill --days 7
+# Disable vision completely for maximum throughput:
+questlog backfill --today --vision-mode never
+# Or force vision on every image:
+questlog backfill --today --vision-mode always
 ```
+
+Backfill defaults to `--vision-mode auto`: OCR first, then vision only for low-confidence
+entries. Use `--vision-mode never` for maximum throughput, or `--vision-mode always`
+when you want the richest model-generated summaries and can tolerate the extra latency.
 
 ### Analysis commands
 

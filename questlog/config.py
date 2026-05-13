@@ -81,6 +81,12 @@ class QuestlogConfig(BaseModel):
         le=1.0,
         description="Minimum confidence score for entries"
     )
+    project_match_threshold: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fuzzy match score required to assign a project"
+    )
     grace_gap_seconds: int = Field(
         default=120,
         ge=0,
@@ -166,4 +172,3 @@ def load_config(config_path: Path | str | None = None, auto_create: bool = False
             )
 
     return QuestlogConfig.from_file(config_path)
-

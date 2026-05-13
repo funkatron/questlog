@@ -2,7 +2,7 @@
 
 import typer
 
-from questlog.cli.commands import analyze, benchmark, capture, database, diagnostic, export
+from questlog.cli.commands import analyze, benchmark, capture, database, diagnostic, export, resume
 
 # Create main Typer app
 app = typer.Typer(
@@ -23,8 +23,10 @@ app.command(name="hour-summary")(export.hour_summary)
 app.command(name="analyze-now")(analyze.analyze_now)
 app.command(name="analyze-file")(analyze.analyze_file)
 app.command(name="what-image")(analyze.what_image)
+app.command(name="resume")(resume.resume)
 app.command()(diagnostic.doctor)
 app.command(name="benchmark")(benchmark.show)
+app.command(name="eval-fixtures")(benchmark.eval_fixtures)
 
 
 def main() -> None:
@@ -34,4 +36,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

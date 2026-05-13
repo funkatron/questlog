@@ -230,6 +230,16 @@ def watch() -> None:
 def backfill(
     days: Optional[int] = typer.Option(None, "--days", "-d", help="Only process last N days"),
     today: bool = typer.Option(False, "--today", help="Only process today's images"),
+    vision_mode: str = typer.Option(
+        "auto",
+        "--vision-mode",
+        help="Vision policy for backfill: never, auto, or always",
+    ),
+    llm_summary: bool = typer.Option(
+        False,
+        "--llm-summary/--no-llm-summary",
+        help="Use LLM text summarization during backfill when vision is disabled",
+    ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging and show OCR output"),
 ) -> None:
     """Scan historical screenshots and index them."""
@@ -253,6 +263,18 @@ def backfill(
 
     started = time.monotonic()
     last_heartbeat = started
+
+    vision_mode = vision_mode.lower().strip()
+    if vision_mode not in {"never", "auto", "always"}:
+        typer.echo("Invalid --vision-mode. Expected one of: never, auto, always.", err=True)
+        raise typer.Exit(2)
+
+    if vision_mode == "never":
+        typer.echo("Backfill mode: fast OCR-only pipeline (vision disabled)")
+    elif vision_mode == "auto":
+        typer.echo("Backfill mode: OCR-first with vision fallback for low-confidence entries")
+    elif not llm_summary:
+        typer.echo("Backfill mode: vision on every image, LLM summarization fallback disabled")
 
     with db_service.connect() as conn:
         count = 0
@@ -291,7 +313,14 @@ def backfill(
                     logger.debug("Processing: %s", p)
 
                 # Historical screenshots: skip app detection, infer from content
-                image_service.process_image(conn, p, use_app_detection=False)
+                image_service.process_image(
+                    conn,
+                    p,
+                    use_app_detection=False,
+                    use_vision_analysis=vision_mode != "never",
+                    use_llm_summarization=llm_summary,
+                    vision_fallback_on_low_confidence=vision_mode == "auto",
+                )
                 count += 1
                 if debug:
                     typer.echo(f"✓ Processed {p.name} ({count} total)")
@@ -324,4 +353,3 @@ def backfill(
             f"Backfill complete in {total_s:.1f}s. Processed {count} new screenshots, skipped {skipped} "
             f"(scanned {scanned}). See {cfg.logfile} for details."
         )
-

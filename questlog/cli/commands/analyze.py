@@ -36,7 +36,12 @@ def _analyze_image(image_path: Path, cfg, image_service: ImageService) -> dict:
     redacted = [redact(l) for l in ocr_top_raw]
     clues = extract_clues(app_name, window_title, redacted)
     proj_guess = resolve_project(
-        cfg.projects, cfg.project_aliases, window_title, redacted, clues
+        cfg.projects,
+        cfg.project_aliases,
+        window_title,
+        redacted,
+        clues,
+        cfg.project_match_threshold,
     )
     summary, coarse_task, confidence = summarize(
         cfg.to_dict(), app_name, window_title, redacted, proj_guess, clues
@@ -167,4 +172,3 @@ def what_image(
     out_path = out_dir / f"historian_{img.stem}.md"
     out_path.write_text(text or "(no response)")
     typer.echo(f"Wrote {out_path}")
-

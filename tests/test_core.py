@@ -40,6 +40,19 @@ def test_resolve_project_with_aliases():
     assert score > 0
 
 
+def test_resolve_project_returns_none_for_weak_match():
+    projects = ["Acme"]
+    name, score = resolve_project(
+        projects,
+        {},
+        "Reading unrelated notes",
+        ["calendar agenda"],
+        {"domains": [], "repo_tokens": []},
+    )
+    assert name is None
+    assert score < 0.70
+
+
 def test_sessionize_groups_by_key_and_gap():
     rows = [
         {"ts": "2025-01-01T10:00:00+00:00", "project": "P", "app": "A", "coarse_task": "Coding"},
@@ -78,3 +91,101 @@ def test_process_image_inserts_entry(tmp_path, monkeypatch):
         assert row[0] == "TestProj"
         assert row[1] == "TestApp"
 
+
+def test_process_image_can_skip_vision_and_llm(tmp_path, monkeypatch):
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"fake")
+
+    monkeypatch.setattr(qls, "ocr_with_easyocr", lambda p, n: ["questlog", "capture.py"])
+    monkeypatch.setattr(qls, "ocr_with_llm", lambda cfg, p, n: ["should not be used"])
+    monkeypatch.setattr(qls, "ocr_lines", lambda p, n: ["fallback"])
+    monkeypatch.setattr(qls, "front_app_info", lambda: {"app": "Unknown", "window_title": "Unknown"})
+
+    seen = {"vision": 0, "llm_summary_disabled": 0}
+
+    def _fail_vision(cfg, path):
+        seen["vision"] += 1
+        raise AssertionError("vision path should be skipped")
+
+    def _fake_summary(cfg, app, window_title, ocr_top, project_guess, clues, vision_result=None, use_llm=True):
+        assert use_llm is False
+        seen["llm_summary_disabled"] += 1
+        return ("Working on questlog", "Coding", 0.7)
+
+    monkeypatch.setattr(qls, "analyze_image_with_vision", _fail_vision)
+    monkeypatch.setattr(qlp, "summarize", _fake_summary)
+
+    cfg = {
+        "projects": ["Questlog"],
+        "project_aliases": {"Questlog": ["questlog"]},
+        "max_ocr_lines": 12,
+        "blocklist_apps": [],
+    }
+
+    db_service = DatabaseService(db_path=tmp_path / "test.db")
+    db_service.ensure_schema()
+    with db_service.connect() as conn:
+        entry_id = process_image(
+            conn,
+            cfg,
+            img,
+            use_app_detection=False,
+            use_vision_analysis=False,
+            use_llm_summarization=False,
+        )
+        assert entry_id is not None
+        cur = conn.execute("select project, app, summary from entries where id=?", (entry_id,))
+        row = cur.fetchone()
+        assert row[0] == "Questlog"
+        assert row[1] == "Code"
+        assert row[2]
+        assert seen == {"vision": 0, "llm_summary_disabled": 1}
+
+
+def test_process_image_auto_uses_vision_for_low_confidence_history(tmp_path, monkeypatch):
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"fake")
+
+    monkeypatch.setattr(qls, "ocr_with_easyocr", lambda p, n: [])
+    monkeypatch.setattr(qls, "ocr_with_llm", lambda cfg, p, n: [])
+    monkeypatch.setattr(qls, "ocr_lines", lambda p, n: [])
+    monkeypatch.setattr(qls, "front_app_info", lambda: {"app": "Unknown", "window_title": "Unknown"})
+    monkeypatch.setattr(
+        qls,
+        "analyze_image_with_vision",
+        lambda cfg, path: {
+            "primary_app": "Google Chrome",
+            "primary_window_title": "questlog pull request",
+            "project_indicators": ["questlog"],
+            "summary": "Reviewing questlog changes in GitHub",
+            "coarse_task": "Coding",
+            "confidence": 0.9,
+        },
+    )
+
+    cfg = {
+        "projects": ["Questlog"],
+        "project_aliases": {"Questlog": ["questlog"]},
+        "max_ocr_lines": 12,
+        "blocklist_apps": [],
+        "confidence_threshold": 0.65,
+    }
+
+    db_service = DatabaseService(db_path=tmp_path / "test.db")
+    db_service.ensure_schema()
+    with db_service.connect() as conn:
+        entry_id = process_image(
+            conn,
+            cfg,
+            img,
+            use_app_detection=False,
+            use_vision_analysis=True,
+            use_llm_summarization=False,
+            vision_fallback_on_low_confidence=True,
+        )
+        cur = conn.execute("select project, app, summary, coarse_task from entries where id=?", (entry_id,))
+        row = cur.fetchone()
+        assert row[0] == "Questlog"
+        assert row[1] == "Google Chrome"
+        assert row[2] == "Reviewing questlog changes in GitHub"
+        assert row[3] == "Coding"

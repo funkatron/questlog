@@ -60,7 +60,13 @@ class ImageService:
         return today_dir
 
     def process_image(
-        self, conn, file_path: Path, use_app_detection: bool = True
+        self,
+        conn,
+        file_path: Path,
+        use_app_detection: bool = True,
+        use_vision_analysis: bool = True,
+        use_llm_summarization: bool = True,
+        vision_fallback_on_low_confidence: bool = False,
     ) -> Optional[int]:
         """Process an image and create database entry.
 
@@ -74,7 +80,13 @@ class ImageService:
             Entry ID if successful, None otherwise.
         """
         return qlp.process_image(
-            conn, self.config.to_dict(), file_path, use_app_detection=use_app_detection
+            conn,
+            self.config.to_dict(),
+            file_path,
+            use_app_detection=use_app_detection,
+            use_vision_analysis=use_vision_analysis,
+            use_llm_summarization=use_llm_summarization,
+            vision_fallback_on_low_confidence=vision_fallback_on_low_confidence,
         )
 
     def iter_images(self, base_folder: Path):
@@ -87,4 +99,3 @@ class ImageService:
             Path objects for image files.
         """
         return qlp.iter_images(base_folder)
-

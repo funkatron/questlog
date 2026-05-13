@@ -103,7 +103,12 @@ def main():
     print("STEP 6: Project Resolution")
     print("-" * 80)
     proj_guess = qlp.resolve_project(
-        cfg.projects, cfg.project_aliases, window_title, redacted, clues
+        cfg.projects,
+        cfg.project_aliases,
+        window_title,
+        redacted,
+        clues,
+        cfg.project_match_threshold,
     )
     print(f"Project: {proj_guess[0]}")
     print(f"Confidence: {proj_guess[1]:.2f}")
@@ -155,4 +160,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

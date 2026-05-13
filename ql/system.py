@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -21,6 +23,12 @@ except ImportError:
 
 # EasyOCR with caching - load model once and reuse
 _easyocr_reader = None
+
+warnings.filterwarnings(
+    "ignore",
+    message="'pin_memory' argument is set as true but not supported on MPS now, device pinned memory won't be used.",
+    category=UserWarning,
+)
 
 def _easyocr_use_gpu() -> bool:
     """Whether EasyOCR should use CUDA/MPS. Set QUESTLOG_EASYOCR_GPU=0 to force CPU."""
@@ -45,6 +53,34 @@ def _get_easyocr_reader():
         except ImportError:
             return None
     return _easyocr_reader
+
+
+@lru_cache(maxsize=32)
+def ollama_model_available(endpoint_cfg: str, model: str) -> bool:
+    """Return whether an Ollama model is available at the configured endpoint."""
+    if not endpoint_cfg or not model:
+        return False
+
+    try:
+        import requests
+
+        gen_url = (
+            endpoint_cfg
+            if endpoint_cfg.endswith("/api/generate")
+            else endpoint_cfg.rstrip("/") + "/api/generate"
+        )
+        tags_url = gen_url.replace("/api/generate", "/api/tags")
+        tags = requests.get(tags_url, timeout=2)
+        names = set()
+        if tags.ok:
+            tj = tags.json()
+            listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
+            for entry in listing or []:
+                if isinstance(entry, dict) and entry.get("name"):
+                    names.add(entry["name"])
+        return model in names
+    except Exception:
+        return False
 
 
 def run_cmd(cmd: List[str]) -> str:
@@ -226,19 +262,7 @@ def ocr_with_llm(cfg: Dict[str, Any], path: Path, max_lines: int) -> List[str]:
         model = ocr_cfg.get("model")
 
         # Check if model is available
-        try:
-            tags_url = gen_url.replace("/api/generate", "/api/tags")
-            tags = requests.get(tags_url, timeout=2)
-            names = set()
-            if tags.ok:
-                tj = tags.json()
-                listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
-                for m in listing or []:
-                    if isinstance(m, dict) and m.get("name"):
-                        names.add(m["name"])
-            if model not in names:
-                return []  # Model not available, fall back to traditional OCR
-        except Exception:
+        if not ollama_model_available(endpoint_cfg, model):
             return []
 
         # Use vision model for OCR with improved prompt to reduce hallucinations
@@ -405,18 +429,9 @@ def analyze_image_with_vision(cfg: Dict[str, Any], path: Path) -> Dict[str, Any]
 
         # Check if model is available
         try:
-            tags_url = gen_url.replace("/api/generate", "/api/tags")
-            tags = requests.get(tags_url, timeout=2)
-            names = set()
-            if tags.ok:
-                tj = tags.json()
-                listing = tj.get("models") if isinstance(tj, dict) else (tj if isinstance(tj, list) else [])
-                for m in listing or []:
-                    if isinstance(m, dict) and m.get("name"):
-                        names.add(m["name"])
-            if model not in names:
+            if not ollama_model_available(endpoint_cfg, model):
                 logger.debug("Vision model %s not available", model)
-                return {}  # Model not available
+                return {}
         except Exception as e:
             logger.debug("Failed to check vision model availability: %s", e)
             return {}
@@ -478,5 +493,4 @@ def analyze_image_with_vision(cfg: Dict[str, Any], path: Path) -> Dict[str, Any]
         logger = logging.getLogger("questlog")
         logger.debug("Vision analysis failed: %s", e)
         return {}
-
 
