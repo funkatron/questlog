@@ -117,3 +117,38 @@ def insert_entry(
     return entry_id
 
 
+def update_entry(
+    conn: sqlite3.Connection,
+    entry_id: int,
+    entry: Dict[str, Any],
+    evidence_text: str,
+    file_path: str,
+    mtime: float,
+) -> int:
+    """Update an existing activity entry and its searchable evidence."""
+    conn.execute(
+        """UPDATE entries
+           SET ts = ?, app = ?, window_title = ?, project = ?, coarse_task = ?,
+               summary = ?, confidence = ?, json = ?
+           WHERE id = ?""",
+        (
+            entry["ts"],
+            entry["app"],
+            entry["window_title"],
+            entry["project"],
+            entry["coarse_task"],
+            entry["summary"],
+            entry["confidence"],
+            json.dumps(entry, ensure_ascii=False),
+            entry_id,
+        ),
+    )
+    conn.execute("DELETE FROM evidence_fts WHERE entry_id = ?", (entry_id,))
+    conn.execute(
+        "INSERT INTO evidence_fts(entry_id, text) VALUES(?, ?)",
+        (entry_id, evidence_text),
+    )
+    store_file_record(conn, file_path, mtime, entry_id)
+    conn.commit()
+    return entry_id
+

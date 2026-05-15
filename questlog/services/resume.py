@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from collections import Counter
 from typing import Any
 
+from ql.processing import (
+    ALLOWED_TASKS,
+    is_generic_summary,
+    is_placeholder_app,
+    normalize_app,
+    normalize_window_title,
+)
 from ql.text import redact_for_display
 
 
@@ -26,6 +34,29 @@ OPEN_LOOP_TERMS = (
     "timeout",
     "todo",
     "wip",
+)
+
+ARTIFACT_RE = re.compile(r"^[\w./~ -]+\.[A-Za-z0-9]{2,8}$")
+GENERIC_SUMMARY_BITS = (
+    "possibly involving",
+    "may also be",
+    "appears to be",
+    "engaged in research and communication activities",
+    "likely developing or debugging code",
+    "software developer working on a project",
+)
+GENERIC_SUMMARY_EXACT = (
+    "working on a coding project",
+    "working on a coding project, working in code",
+    "working on a software project",
+    "recent activity captured",
+)
+THIRD_PERSON_PREFIXES = (
+    "the user appears to be ",
+    "the user is ",
+    "the user was ",
+    "a user is ",
+    "a user was ",
 )
 
 
@@ -54,6 +85,7 @@ class ResumeService:
         open_loops = self._open_loops(rows)
         artifacts = self._artifacts(rows)
         last_session = sessions[-1] if sessions else None
+        last_session_open_loops = self._open_loops(last_session["items"]) if last_session else []
 
         return {
             "window_start": window_start.isoformat(timespec="seconds"),
@@ -65,7 +97,7 @@ class ResumeService:
             "recent_sessions": [self._session_summary(s) for s in sessions[-5:]],
             "context_switches": self._context_switches(sessions),
             "open_loops": open_loops[:5],
-            "next_action": self._next_action(last_session, open_loops, artifacts),
+            "next_action": self._next_action(last_session, last_session_open_loops, artifacts),
             "low_confidence": low_confidence[:5],
         }
 
@@ -124,17 +156,22 @@ class ResumeService:
         rows = []
         for row in cur.fetchall():
             item = dict(row)
-            item["summary"] = redact_for_display(item.get("summary") or "")
+            item["app"] = normalize_app(item.get("app") or "")
+            item["window_title"] = normalize_window_title(item.get("window_title") or "", item["app"])
+            if item.get("coarse_task") not in ALLOWED_TASKS:
+                item["coarse_task"] = "Unknown"
+            item["summary"] = self._clean_summary(item.get("summary") or "")
             item["window_title"] = redact_for_display(item.get("window_title") or "")
             item["artifacts"] = []
+            item["clues"] = {}
             if item.get("json"):
                 try:
                     payload = json.loads(item["json"])
-                    item["artifacts"] = [
-                        redact_for_display(str(a)) for a in payload.get("artifacts", [])[:5]
-                    ]
+                    item["artifacts"] = self._clean_artifacts(payload.get("artifacts", []))
+                    item["clues"] = payload.get("clues", {}) or {}
                 except Exception:
                     item["artifacts"] = []
+                    item["clues"] = {}
             rows.append(item)
         return rows
 
@@ -193,8 +230,8 @@ class ResumeService:
             return []
         items = []
         for row in reversed(session["items"]):
-            summary = row.get("summary") or row.get("window_title")
-            if summary and summary not in items:
+            summary = self._row_text(row)
+            if summary and not self._is_weak_summary(summary) and summary not in items:
                 items.append(summary)
             if len(items) >= 3:
                 break
@@ -209,15 +246,19 @@ class ResumeService:
         for row in reversed(rows):
             text = " ".join(
                 [
-                    row.get("summary") or "",
+                    self._row_text(row),
                     row.get("window_title") or "",
                     " ".join(row.get("artifacts", [])),
                 ]
             )
             lower = f" {text.lower()} "
             if any(term in lower for term in OPEN_LOOP_TERMS):
-                item = row.get("summary") or row.get("window_title") or "Review recent item"
-                if item not in loops:
+                item = self._row_text(row) or "Review recent item"
+                if self._is_broad_activity(item):
+                    continue
+                if not self._has_concrete_context(row):
+                    continue
+                if not self._is_weak_summary(item) and item not in loops:
                     loops.append(item)
         return loops
 
@@ -225,7 +266,7 @@ class ResumeService:
         artifacts = []
         for row in reversed(rows):
             for artifact in row.get("artifacts", []):
-                if artifact and artifact not in artifacts:
+                if self._is_valid_artifact(artifact) and artifact not in artifacts:
                     artifacts.append(artifact)
         return artifacts
 
@@ -248,9 +289,24 @@ class ResumeService:
             project = row.get("project") or "Unknown"
             task = row.get("coarse_task") or "Unknown"
             app = row.get("app") or "Unknown"
-            if confidence < threshold or "Unknown" in {project, task, app}:
-                summary = row.get("summary") or row.get("window_title") or "Unclear activity"
-                label = f"{summary} ({confidence:.2f})"
+            title = row.get("window_title") or ""
+            summary = row.get("summary") or ""
+            reasons = []
+            if confidence < threshold:
+                reasons.append(f"confidence {confidence:.2f}")
+            if project == "Unknown":
+                reasons.append("unknown project")
+            if task == "Unknown":
+                reasons.append("unknown task")
+            if app == "Unknown" or is_placeholder_app(app):
+                reasons.append("unknown app")
+            if self._is_weak_title(title):
+                reasons.append("weak title")
+            if is_generic_summary(summary):
+                reasons.append("generic summary")
+            if reasons:
+                summary = self._row_text(row) or "Unclear activity"
+                label = f"{summary} ({', '.join(reasons)})"
                 if label not in items:
                     items.append(label)
         return items
@@ -277,9 +333,9 @@ class ResumeService:
 
     def _best_summary(self, rows: list[dict[str, Any]]) -> str:
         summaries = [
-            row.get("summary") or row.get("window_title") or ""
+            self._row_text(row)
             for row in rows
-            if row.get("summary") or row.get("window_title")
+            if self._row_text(row) and not self._is_weak_summary(self._row_text(row))
         ]
         if not summaries:
             return "Recent activity captured"
@@ -289,3 +345,121 @@ class ResumeService:
         if not items:
             return [f"- {fallback}"]
         return [f"- {item}" for item in items]
+
+    def _clean_summary(self, value: str) -> str:
+        summary = redact_for_display(value).strip()
+        summary = re.sub(r"\s+", " ", summary)
+        lower = summary.lower()
+
+        for prefix in THIRD_PERSON_PREFIXES:
+            if lower.startswith(prefix):
+                summary = summary[len(prefix):].strip()
+                if summary:
+                    summary = summary[0].upper() + summary[1:]
+                break
+
+        # Keep the concrete first sentence when vision adds speculative follow-up.
+        parts = re.split(r"(?<=[.!?])\s+", summary)
+        if len(parts) > 1 and any(bit in lower for bit in GENERIC_SUMMARY_BITS):
+            summary = parts[0]
+
+        replacements = {
+            "They may also be engaged in research and communication activities.": "",
+            "possibly involving code in a file named 'file.py'": "working in code",
+            "possibly involving code in a file named file.py": "working in code",
+        }
+        for old, new in replacements.items():
+            summary = summary.replace(old, new)
+
+        summary = summary.strip(" -.")
+        return summary or "Recent activity captured"
+
+    def _clean_artifacts(self, artifacts: list[Any]) -> list[str]:
+        cleaned = []
+        for artifact in artifacts:
+            value = redact_for_display(str(artifact)).strip()
+            if self._is_valid_artifact(value) and value not in cleaned:
+                cleaned.append(value)
+        return cleaned[:5]
+
+    def _is_valid_artifact(self, value: str) -> bool:
+        value = (value or "").strip()
+        if len(value) < 5 or value.lower() in {"e.g", "i.e", "etc."}:
+            return False
+        if not ARTIFACT_RE.match(value):
+            return False
+        if value.lower().endswith((".com", ".org", ".net")):
+            return False
+        return True
+
+    def _is_weak_summary(self, value: str) -> bool:
+        norm = " ".join((value or "").strip().lower().split())
+        if not norm:
+            return True
+        if norm in {"recent activity captured", "unknown", "using unknown"}:
+            return True
+        if norm in GENERIC_SUMMARY_EXACT:
+            return True
+        if any(bit in norm for bit in GENERIC_SUMMARY_BITS) and len(norm) > 120:
+            return True
+        return False
+
+    def _row_text(self, row: dict[str, Any]) -> str:
+        summary = row.get("summary") or ""
+        title = row.get("window_title") or ""
+        if (
+            title
+            and not self._is_weak_title(title)
+            and self._is_weak_summary(summary)
+        ):
+            return title
+        if (
+            title
+            and not self._is_weak_title(title)
+            and self._is_generic_model_summary(summary)
+        ):
+            return title
+        return summary or title
+
+    def _is_generic_model_summary(self, value: str) -> bool:
+        norm = " ".join((value or "").strip().lower().split())
+        if norm in GENERIC_SUMMARY_EXACT:
+            return True
+        return any(bit in norm for bit in GENERIC_SUMMARY_BITS)
+
+    def _is_weak_title(self, value: str) -> bool:
+        norm = " ".join((value or "").strip().lower().split())
+        return norm in {
+            "",
+            "unknown",
+            "main window",
+            "main window title",
+            "google chrome",
+            "chrome - google chrome",
+        }
+
+    def _has_concrete_context(self, row: dict[str, Any]) -> bool:
+        title = row.get("window_title") or ""
+        if title and not self._is_weak_title(title):
+            return True
+        if any(self._is_valid_artifact(a) for a in row.get("artifacts", [])):
+            return True
+        clues = row.get("clues") or {}
+        if clues.get("urls") or clues.get("domains") or clues.get("repo_tokens"):
+            return True
+        text = f"{self._row_text(row)} {title}".lower()
+        if self._is_broad_activity(text):
+            return False
+        return any(term in f" {text} " for term in OPEN_LOOP_TERMS)
+
+    def _is_broad_activity(self, value: str) -> bool:
+        norm = " ".join((value or "").strip().lower().split())
+        broad_bits = (
+            "working on a software project",
+            "software developer working on a project",
+            "collaborating on project",
+            "developing python code",
+            "developing and monitoring project progress",
+            "focused on coding, with some communication activity",
+        )
+        return any(bit in norm for bit in broad_bits)

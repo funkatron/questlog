@@ -67,6 +67,7 @@ class ImageService:
         use_vision_analysis: bool = True,
         use_llm_summarization: bool = True,
         vision_fallback_on_low_confidence: bool = False,
+        replace_entry_id: Optional[int] = None,
     ) -> Optional[int]:
         """Process an image and create database entry.
 
@@ -87,6 +88,7 @@ class ImageService:
             use_vision_analysis=use_vision_analysis,
             use_llm_summarization=use_llm_summarization,
             vision_fallback_on_low_confidence=vision_fallback_on_low_confidence,
+            replace_entry_id=replace_entry_id,
         )
 
     def iter_images(self, base_folder: Path):

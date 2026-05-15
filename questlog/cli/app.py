@@ -7,7 +7,7 @@ from questlog.cli.commands import analyze, benchmark, capture, database, diagnos
 # Create main Typer app
 app = typer.Typer(
     name="questlog",
-    help="Activity logging from screenshots",
+    help="Local-first context recovery and restart notes",
     add_completion=False,
 )
 
@@ -17,6 +17,7 @@ app.command()(capture.snap)
 app.command()(capture.capture)
 app.command()(capture.watch)
 app.command()(capture.backfill)
+app.command()(capture.enrich)
 app.command(name="export-md")(export.export_md)
 app.command(name="export-csv")(export.export_csv)
 app.command(name="hour-summary")(export.hour_summary)

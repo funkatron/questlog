@@ -84,6 +84,34 @@ def test_resume_identifies_recent_thread_and_artifact(tmp_path):
     assert data["next_action"].startswith("Return to:")
 
 
+def test_resume_filters_noisy_artifacts_and_cleans_third_person_summary(tmp_path):
+    db = DatabaseService(db_path=tmp_path / "test.db")
+    db.ensure_schema()
+    now = dt.datetime(2026, 5, 13, 12, tzinfo=dt.timezone.utc)
+
+    with db.connect() as conn:
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=10),
+            summary=(
+                "The user appears to be working on a coding project, possibly involving "
+                "code in a file named 'file.py'. They may also be engaged in research "
+                "and communication activities."
+            ),
+            title="Assess ADHD user needs questlog",
+            artifacts=["e.g", "questlog/services/resume.py"],
+        )
+        conn.commit()
+        data = _service().build_resume(conn, now=now)
+
+    rendered = _service().render_text(data)
+    assert "The user appears" not in rendered
+    assert "They may also" not in rendered
+    assert "Assess ADHD user needs questlog" in rendered
+    assert "Artifact: e.g" not in rendered
+    assert "Artifact: questlog/services/resume.py" in rendered
+
+
 def test_resume_reports_context_switches_and_low_confidence(tmp_path):
     db = DatabaseService(db_path=tmp_path / "test.db")
     db.ensure_schema()
@@ -115,6 +143,116 @@ def test_resume_reports_context_switches_and_low_confidence(tmp_path):
     assert any("Slack" in item and "Cursor" in item for item in data["context_switches"])
     assert any("Reviewing PR discussion" in item for item in data["low_confidence"])
     assert "Fixing timeout failure" in data["open_loops"]
+
+
+def test_resume_restart_point_prefers_latest_thread_over_older_open_loop(tmp_path):
+    db = DatabaseService(db_path=tmp_path / "test.db")
+    db.ensure_schema()
+    now = dt.datetime(2026, 5, 13, 12, tzinfo=dt.timezone.utc)
+
+    with db.connect() as conn:
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=50),
+            app="Visual Studio Code",
+            project="Questlog",
+            task="Coding",
+            summary="Debugging old failing test",
+        )
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=5),
+            app="Visual Studio Code",
+            project="Questlog",
+            task="Coding",
+            title="Assess ADHD user needs questlog",
+            summary="The user appears to be working on a coding project, possibly involving code.",
+        )
+        conn.commit()
+        data = _service().build_resume(conn, now=now)
+
+    assert "Debugging old failing test" in data["open_loops"]
+    assert data["next_action"] == "Resume: Assess ADHD user needs questlog"
+
+
+def test_resume_filters_broad_open_loop_without_concrete_context(tmp_path):
+    db = DatabaseService(db_path=tmp_path / "test.db")
+    db.ensure_schema()
+    now = dt.datetime(2026, 5, 13, 12, tzinfo=dt.timezone.utc)
+
+    with db.connect() as conn:
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=20),
+            app="Visual Studio Code",
+            project="Questlog",
+            task="Coding",
+            title="Main Window Title",
+            summary="Working on a software project using Visual Studio Code, likely developing or debugging code",
+        )
+        conn.commit()
+        data = _service().build_resume(conn, now=now)
+
+    assert data["open_loops"] == []
+
+
+def test_resume_low_confidence_items_explain_quality_reasons(tmp_path):
+    db = DatabaseService(db_path=tmp_path / "test.db")
+    db.ensure_schema()
+    now = dt.datetime(2026, 5, 13, 12, tzinfo=dt.timezone.utc)
+
+    with db.connect() as conn:
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=20),
+            app="AppName",
+            project="Questlog",
+            task="Coding",
+            title="Main Window Title",
+            summary="Working on a software project using various applications",
+            confidence=0.9,
+        )
+        conn.commit()
+        data = _service().build_resume(conn, now=now)
+
+    assert data["low_confidence"]
+    item = data["low_confidence"][0]
+    assert "unknown app" in item
+    assert "weak title" in item
+    assert "generic summary" in item
+
+
+def test_resume_open_loops_require_concrete_evidence(tmp_path):
+    db = DatabaseService(db_path=tmp_path / "test.db")
+    db.ensure_schema()
+    now = dt.datetime(2026, 5, 13, 12, tzinfo=dt.timezone.utc)
+
+    with db.connect() as conn:
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=30),
+            app="Cursor",
+            project="Questlog",
+            task="Coding",
+            title="Main Window Title",
+            summary="Developing Python code, debugging in shell, possibly for project work",
+            confidence=0.9,
+        )
+        _insert_entry(
+            conn,
+            ts=now - dt.timedelta(minutes=10),
+            app="Cursor",
+            project="Questlog",
+            task="Test",
+            title="resume.py",
+            summary="Fixing failing resume tests",
+            confidence=0.9,
+            artifacts=["questlog/services/resume.py"],
+        )
+        conn.commit()
+        data = _service().build_resume(conn, now=now)
+
+    assert data["open_loops"] == ["Fixing failing resume tests"]
 
 
 def test_resume_redacts_display_text(tmp_path):

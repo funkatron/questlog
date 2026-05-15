@@ -24,10 +24,245 @@ from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt, 
 
 logger = logging.getLogger("questlog")
 
+ALLOWED_TASKS = {
+    "Coding",
+    "Research",
+    "Comms",
+    "Build",
+    "Test",
+    "Design",
+    "Meeting",
+    "Admin",
+    "Idle",
+    "Notes",
+    "Unknown",
+}
+
+PLACEHOLDER_APPS = {
+    "",
+    "unknown",
+    "app",
+    "appname",
+    "application",
+}
+
+PLACEHOLDER_TITLES = {
+    "",
+    "unknown",
+    "main window",
+    "main window title",
+    "window",
+    "window title",
+}
+
+GENERIC_SUMMARY_BITS = (
+    "appears to be",
+    "possibly",
+    "may also",
+    "various applications",
+    "working on a project",
+    "working on a software project",
+    "coding or research",
+    "developing and monitoring project progress",
+    "likely developing or debugging code",
+)
+
+THIRD_PERSON_PREFIXES = (
+    "the user appears to be ",
+    "the user is ",
+    "the user was ",
+    "a user is ",
+    "a user was ",
+)
+
+CONCRETE_OPEN_LOOP_TERMS = (
+    "blocked",
+    "broken",
+    "debug",
+    "error",
+    "fail",
+    "failed",
+    "fix",
+    "issue",
+    "pr ",
+    "pull request",
+    "review",
+    "test",
+    "timeout",
+    "todo",
+    "wip",
+)
+
 
 def _norm_text(value: str) -> str:
     """Normalize text for loose heuristic matching."""
     return " ".join((value or "").strip().lower().split())
+
+
+def is_placeholder_app(value: str) -> bool:
+    """Return whether an app value is a model placeholder rather than evidence."""
+    norm = _norm_text(value)
+    return norm in PLACEHOLDER_APPS or bool(re.fullmatch(r"app\s*\d+", norm))
+
+
+def normalize_app(value: str) -> str:
+    """Normalize app names while preserving real unknown app names."""
+    value = (value or "").strip()
+    return "Unknown" if is_placeholder_app(value) else value
+
+
+def is_weak_title(value: str, app: str = "") -> bool:
+    """Return whether a window title is too generic to use as concrete context."""
+    norm = _norm_text(value)
+    app_norm = _norm_text(app)
+    if norm in PLACEHOLDER_TITLES:
+        return True
+    if app_norm and norm == app_norm:
+        return True
+    return norm in {
+        "google chrome",
+        "chrome - google chrome",
+        "safari",
+        "cursor",
+        "visual studio code",
+    }
+
+
+def normalize_window_title(value: str, app: str = "") -> str:
+    """Normalize weak or placeholder window titles to Unknown."""
+    value = (value or "").strip()
+    return "Unknown" if is_weak_title(value, app) else value
+
+
+def clean_summary(value: str) -> str:
+    """Clean model-style prose into a short, neutral stored summary."""
+    summary = re.sub(r"\s+", " ", (value or "").strip())
+    lower = summary.lower()
+
+    for prefix in THIRD_PERSON_PREFIXES:
+        if lower.startswith(prefix):
+            summary = summary[len(prefix):].strip()
+            if summary:
+                summary = summary[0].upper() + summary[1:]
+            break
+
+    parts = re.split(r"(?<=[.!?])\s+", summary)
+    if len(parts) > 1 and any(bit in lower for bit in GENERIC_SUMMARY_BITS):
+        summary = parts[0]
+
+    replacements = {
+        "They may also be engaged in research and communication activities.": "",
+        "possibly involving code in a file named 'file.py'": "working in code",
+        "possibly involving code in a file named file.py": "working in code",
+    }
+    for old, new in replacements.items():
+        summary = summary.replace(old, new)
+
+    summary = summary.strip(" -.")
+    return summary or "Recent activity captured"
+
+
+def is_generic_summary(value: str) -> bool:
+    """Return whether a summary is too broad to treat as strong evidence."""
+    norm = _norm_text(value)
+    if not norm:
+        return True
+    if norm in {"unknown", "recent activity captured", "using unknown"}:
+        return True
+    return any(bit in norm for bit in GENERIC_SUMMARY_BITS)
+
+
+def validate_task(raw_task: str, app: str, ocr_text: str) -> str:
+    """Return one supported task label, inferring only when deterministic."""
+    task = (raw_task or "").strip()
+    if task in ALLOWED_TASKS:
+        return task
+    inferred = guess_task(app, ocr_text.lower())
+    return inferred if inferred != "Unknown" else "Unknown"
+
+
+def has_concrete_evidence(
+    *,
+    app: str,
+    window_title: str,
+    summary: str,
+    project: Optional[str],
+    task: str,
+    clues: Dict[str, Any],
+    artifacts: List[str],
+) -> bool:
+    """Return whether an entry has concrete restart-grade evidence."""
+    if artifacts:
+        return True
+    if project:
+        return True
+    if clues.get("urls") or clues.get("domains") or clues.get("repo_tokens"):
+        return True
+    text = f" {summary} {window_title} ".lower()
+    if any(term in text for term in CONCRETE_OPEN_LOOP_TERMS):
+        return True
+    if app != "Unknown" and task != "Unknown" and not is_weak_title(window_title, app):
+        return True
+    return False
+
+
+def calibrate_confidence(
+    raw_confidence: float,
+    *,
+    app: str,
+    window_title: str,
+    project: Optional[str],
+    project_confidence: float,
+    task: str,
+    summary: str,
+    clues: Dict[str, Any],
+    artifacts: List[str],
+) -> float:
+    """Compute confidence from concrete signals instead of trusting model output."""
+    score = 0.20
+    if app != "Unknown":
+        score += 0.15
+    if not is_weak_title(window_title, app):
+        score += 0.15
+    if task != "Unknown":
+        score += 0.15
+    if project:
+        score += 0.10 if project_confidence >= 0.85 else 0.06
+    if clues.get("urls") or clues.get("domains"):
+        score += 0.08
+    if clues.get("repo_tokens"):
+        score += 0.04
+    if artifacts:
+        score += 0.12
+    if summary and not is_generic_summary(summary):
+        score += 0.10
+    if has_concrete_evidence(
+        app=app,
+        window_title=window_title,
+        summary=summary,
+        project=project,
+        task=task,
+        clues=clues,
+        artifacts=artifacts,
+    ):
+        score += 0.06
+
+    caps = [0.95]
+    if app == "Unknown":
+        caps.append(0.70)
+    if is_weak_title(window_title, app):
+        caps.append(0.72)
+    if task == "Unknown":
+        caps.append(0.68)
+    if project is None:
+        caps.append(0.85)
+    if is_generic_summary(summary):
+        caps.append(0.65)
+    if raw_confidence < 0.50:
+        caps.append(0.60)
+
+    confidence = min(score, *caps)
+    return float(f"{max(0.0, min(confidence, 0.95)):.2f}")
 
 
 # Default task classification by application name
@@ -534,6 +769,7 @@ def process_image(
     use_vision_analysis: bool = True,
     use_llm_summarization: bool = True,
     vision_fallback_on_low_confidence: bool = False,
+    replace_entry_id: Optional[int] = None,
 ) -> Optional[int]:
     """Process a screenshot image and create a database entry.
 
@@ -700,6 +936,24 @@ def process_image(
 
     artifacts = find_artifacts(window_title, redacted)
 
+    app = normalize_app(app)
+    window_title = normalize_window_title(window_title, app)
+    summary = clean_summary(summary)
+    coarse_task = validate_task(coarse_task, app, " ".join(redacted))
+    if is_generic_summary(summary) and not is_weak_title(window_title, app):
+        summary = window_title
+    confidence = calibrate_confidence(
+        float(confidence or 0.0),
+        app=app,
+        window_title=window_title,
+        project=proj_guess[0],
+        project_confidence=float(proj_guess[1] or 0.0),
+        task=coarse_task,
+        summary=summary,
+        clues=clues,
+        artifacts=artifacts,
+    )
+
     # Diagnostic logging for Unknown entries
     if app == "Unknown" or window_title == "Unknown" or coarse_task == "Unknown":
         logger.warning(
@@ -723,7 +977,10 @@ def process_image(
     }
 
     evidence_text = "\n".join([window_title] + redacted + clues.get("urls", []))
-    entry_id = qldb.insert_entry(conn, entry, evidence_text, str(file_path), mtime)
+    if replace_entry_id is not None:
+        entry_id = qldb.update_entry(conn, replace_entry_id, entry, evidence_text, str(file_path), mtime)
+    else:
+        entry_id = qldb.insert_entry(conn, entry, evidence_text, str(file_path), mtime)
     logger.info(
         "indexed %s (entry_id=%s, app=%s, task=%s, conf=%.2f)",
         file_path.name, entry_id, app, coarse_task, confidence
