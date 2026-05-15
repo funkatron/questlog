@@ -1,6 +1,6 @@
 # Questlog — Current Status
 
-Last updated: 2025-11-24
+Last updated: 2026-05-13
 
 ## Summary
 - Vision-first analysis using LLM vision models (llava:7b) for holistic scene understanding
@@ -45,3 +45,10 @@ Last updated: 2025-11-24
 - Optimize vision analysis performance (faster models or GPU acceleration)
 - Extract text directly from vision analysis responses when available
 - Improve dual-pane/multi-app scenario detection
+- Explore "state probes" from visible context: detect file paths, repositories,
+  apps, URLs, and project hints on screen, then safely inspect nearby local state
+  for richer restart notes. Examples: current `.git/HEAD`, `git status`,
+  `git diff --stat`, editor workspace files, browser/app state where available,
+  or app-specific metadata. This should be opt-in or tightly scoped, local-first,
+  read-only by default, and surfaced as evidence with uncertainty rather than as
+  hidden inference.

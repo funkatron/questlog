@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "questlog"
 version = "0.1.0"
-description = "On-device activity logging from periodic screenshots"
+description = "Local-first context recovery and restart notes from recent screen activity"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Questlog Contributors"}
 ]
-keywords = ["activity-logging", "screenshots", "ocr", "llm", "productivity"]
+keywords = ["context-recovery", "restart-notes", "screenshots", "ocr", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -57,5 +57,4 @@ ql = "questlog.cli.app:app"
 
 [tool.setuptools.packages.find]
 include = ["ql*", "questlog*"]
-
 
