@@ -38,6 +38,7 @@ from ql.vocabulary import (
     TERMINAL_TASK_KEYWORDS,
     SummaryPhrase,
     App,
+    TitleScoreWeight,
     norm_text as _norm_text,
 )
 
@@ -536,28 +537,30 @@ def process_image(
 
     # SUPPLEMENTAL: OCR for additional text context
     # Try EasyOCR first (best quality), then LLM OCR, then Tesseract
-    max_ocr_lines = cfg.get("max_ocr_lines", 12)
-    ocr_top_raw = qls.ocr_with_easyocr(file_path, max_ocr_lines)
-    if not ocr_top_raw:
-        ocr_top_raw = qls.ocr_with_llm(cfg, file_path, max_ocr_lines)
-    if not ocr_top_raw:
-        ocr_top_raw = qls.ocr_lines(file_path, max_ocr_lines)
+    max_ocr_lines = int(cfg.get("max_ocr_lines", 12))
+    ocr_line_budget = max(max_ocr_lines, TitleScoreWeight.OCR_INFERENCE_MIN_LINES)
+    ocr_capture_raw = qls.ocr_with_easyocr(file_path, ocr_line_budget)
+    if not ocr_capture_raw:
+        ocr_capture_raw = qls.ocr_with_llm(cfg, file_path, ocr_line_budget)
+    if not ocr_capture_raw:
+        ocr_capture_raw = qls.ocr_lines(file_path, ocr_line_budget)
 
-    # Log raw OCR output in debug mode
+    ocr_top_raw = ocr_capture_raw[:max_ocr_lines]
     logger.debug("OCR raw (%d lines): %s", len(ocr_top_raw), ocr_top_raw[:10])
 
-    # Filter out cruft (menu bars, UI elements, system stats, etc.)
     ocr_filtered = filter_ocr_cruft(ocr_top_raw)
+    ocr_infer_filtered = filter_ocr_cruft(ocr_capture_raw)
     logger.debug("OCR filtered (%d lines): %s", len(ocr_filtered), ocr_filtered[:10])
 
     redacted = [redact(line) for line in ocr_filtered]
+    redacted_infer = [redact(line) for line in ocr_infer_filtered]
 
     if window_title == Placeholder.UNKNOWN and redacted:
         title_app = app
         if title_app == Placeholder.UNKNOWN and not use_app_detection:
-            title_app = infer_app_from_content(window_title, redacted)
-        # Fallback: Improve window title from OCR if still Unknown
-        window_title = choose_window_title_from_ocr(title_app, redacted)
+            title_app = infer_app_from_content(window_title, redacted_infer)
+        title_source = redacted_infer if title_app in BROWSER_APPS else redacted
+        window_title = choose_window_title_from_ocr(title_app, title_source)
         logger.debug("Using OCR fallback for window title: %s", window_title[:40])
 
     # Clean up window title if it looks like system stats (even when not unknown)
@@ -583,7 +586,7 @@ def process_image(
 
     # Infer app from content if we didn't detect it
     if app == Placeholder.UNKNOWN and not use_app_detection:
-        app = infer_app_from_content(window_title, redacted)
+        app = infer_app_from_content(window_title, redacted_infer)
 
     clues = extract_clues(app, window_title, redacted)
     proj_guess = resolve_project(

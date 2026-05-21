@@ -5,6 +5,7 @@ from ql.enrichment import (
     detect_browser_content,
     detect_work_tracking_context,
     has_dual_context,
+    infer_app_from_content,
     is_ambient_ocr_fragment,
     is_low_signal_title,
     is_weak_window_title,
@@ -12,12 +13,19 @@ from ql.enrichment import (
     refine_task_from_content,
     suggests_multitasking_during_call,
 )
+from ql.vocabulary import App, Task
 
 
 def test_ambient_fragments_are_not_used_as_titles():
     assert is_ambient_ocr_fragment("Mon Apr 27")
-    assert is_ambient_ocr_fragment("WBD internal check in")
+    assert is_ambient_ocr_fragment("team check in", App.CURSOR)
+    assert not is_ambient_ocr_fragment("team check in", App.SLACK)
     assert not is_ambient_ocr_fragment("Workflow runs")
+
+
+def test_infer_app_prefers_browser_signals_over_garbled_menu_tokens():
+    ocr = ["Draw", "Edit", "Image", "View", "Window", "Help", "iCloud", "Search"]
+    assert infer_app_from_content("Unknown", ocr) == App.SAFARI
 
 
 def test_low_signal_title_rejects_menu_bar_garble():
@@ -38,10 +46,10 @@ def test_choose_title_prefers_meeting_over_workplace_for_zoom():
 
 def test_choose_title_rejects_ambient_bleed_for_editor_apps():
     title = choose_window_title_from_ocr(
-        "Cursor",
-        ["Cursor", "Selection", "Run", "WBD internal check in", "now"],
+        App.CURSOR,
+        [App.CURSOR, "Selection", "Run", "team check in reminder", "now"],
     )
-    assert title == "Cursor"
+    assert title == App.CURSOR
 
 
 def test_choose_title_uses_browser_hint_for_non_browser_frontmost_noise():
@@ -107,12 +115,32 @@ def test_refine_summary_for_work_tracking_in_browser():
     assert refined.coarse_task == "Meeting"
 
 
+def test_refine_summary_for_garbled_linear_title_during_call():
+    refined = refine_summary_and_task(
+        App.SAFARI,
+        "linear applfictivekinteam/WBD/active",
+        ["Campaigns", "Workflow runs", "Accounts", "Cam"],
+        Task.RESEARCH,
+        {},
+    )
+    assert "Linear issues" in refined.summary
+    assert "Zoom call" in refined.summary
+
+
+def test_pick_browser_context_title_prefers_icloud():
+    title = choose_window_title_from_ocr(
+        App.SAFARI,
+        ["Draw", "Image", "Window", "iCloud", "Popular", "green light podcst"],
+    )
+    assert title == "iCloud"
+
+
 def test_refine_summary_for_comms_check_in_pattern():
     refined = refine_summary_and_task(
-        "Slack",
-        "WBD internal check in",
-        ["Slack", "WBD internal check in", "Mon"],
-        "Comms",
+        App.SLACK,
+        "team check in thread",
+        [App.SLACK, "team check in thread", "Mon"],
+        Task.COMMS,
         {},
     )
     assert "check-in" in refined.summary.lower()

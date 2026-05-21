@@ -215,8 +215,11 @@ class TitleScoreWeight:
     CURSOR_CHECK_IN_PENALTY: Final = 30.0
     CURSOR_APP_NAME_BONUS: Final = 25.0
     SAFARI_WORK_UI_BONUS: Final = 8.0
+    SAFARI_NON_CONTEXT_PENALTY: Final = 10.0
     MIN_TITLE_LENGTH: Final = 4
     SHORT_NON_BROWSER_TITLE_MAX: Final = 12
+    OCR_INFERENCE_MIN_LINES: Final = 24
+    NOTIFICATION_BLEED_PENALTY: Final = 30.0
 
 
 def norm_text(value: str) -> str:
@@ -275,8 +278,7 @@ NON_BROWSER_FRONTMOST_APPS: Final = frozenset(
     {App.DRAW_THINGS, App.FIGMA, App.PHOTOS, App.PREVIEW}
 )
 
-AMBIENT_OCR_FRAGMENTS: Final = (
-    OcrSignal.CHECK_IN,
+AMBIENT_DATE_TIME_FRAGMENTS: Final = (
     OcrSignal.SINGLE_IMAGE,
     OcrSignal.MOVIES,
     MonthToken.MON,
@@ -286,6 +288,9 @@ AMBIENT_OCR_FRAGMENTS: Final = (
     OcrSignal.TODAY,
     OcrSignal.NOW,
 )
+
+# Kept for backwards-compatible imports; prefer DATE_TIME + app-aware check-in handling.
+AMBIENT_OCR_FRAGMENTS: Final = AMBIENT_DATE_TIME_FRAGMENTS
 
 MEETING_SIGNALS: Final = (
     OcrSignal.ZOOM,
@@ -320,6 +325,10 @@ BROWSER_CONTENT_SIGNALS: Final = (
     OcrSignal.TABS,
 )
 
+OCR_CONTEXT_PRESERVE_SIGNALS: Final = (
+    BROWSER_CONTENT_SIGNALS + WORK_TRACKING_SIGNALS + MEETING_SIGNALS
+)
+
 TITLE_KEYWORD_BONUSES: Final = (
     OcrSignal.ISSUE,
     OcrSignal.WORKFLOW,
@@ -336,6 +345,18 @@ SAFARI_TITLE_KEYWORD_BONUSES: Final = (
     OcrSignal.CAMPAIGN,
     OcrSignal.ISSUE,
     OcrSignal.ACCOUNTS,
+    OcrSignal.ICLOUD,
+    OcrSignal.YOUTUBE,
+    OcrSignal.TABS,
+)
+
+# Preferred browser title labels when OCR surfaces these content signals.
+BROWSER_CONTEXT_TITLE_SIGNALS: Final = (
+    (OcrSignal.YOUTUBE, "YouTube"),
+    (OcrSignal.ICLOUD, "iCloud"),
+    (OcrSignal.TABS, "Safari tabs"),
+    (OcrSignal.WORKFLOW_RUNS, "Workflow runs"),
+    (OcrSignal.ISSUES, "Issues"),
 )
 
 WEAK_BROWSER_TITLES: Final = frozenset(
@@ -507,3 +528,11 @@ class SummaryPhrase:
     @staticmethod
     def labeled_work_item(label: str, base: str) -> str:
         return f"{label} {base}".strip()
+
+    @staticmethod
+    def work_issues_in_app(label: str, app: str) -> str:
+        return f"{label} issues in {app}"
+
+    @staticmethod
+    def work_items_during_call(label: str, app: str) -> str:
+        return f"Reviewing {label} issues during a Zoom call in {app}"

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
 
 from ql.vocabulary import (
-    AMBIENT_OCR_FRAGMENTS,
+    AMBIENT_DATE_TIME_FRAGMENTS,
     APP_INFERENCE_RULES,
     APP_WHERE_NAME_IS_VALID_TITLE,
     BROWSER_APPS,
     BROWSER_CONTENT_SIGNALS,
+    BROWSER_CONTEXT_TITLE_SIGNALS,
     BROWSER_WORK_UI_SIGNALS,
     BrowserLabel,
     ClueKey,
@@ -33,13 +35,14 @@ from ql.vocabulary import (
     SAFARI_TITLE_KEYWORD_BONUSES,
     SummaryPhrase,
     Task,
+    App,
+    AppSlug,
     TITLE_KEYWORD_BONUSES,
     TitleScoreWeight,
     WEAK_BROWSER_TITLES,
     WORK_TRACKING_SIGNALS,
     WORK_TRACKING_TOOLS,
     WorkTrackingLabel,
-    AppSlug,
     norm_text,
 )
 
@@ -50,12 +53,17 @@ class SummaryRefinement:
     coarse_task: str
 
 
-def is_ambient_ocr_fragment(text: str) -> bool:
-    """Return whether OCR text looks like clock/date/chrome rather than task content."""
+def is_ambient_ocr_fragment(text: str, app: str = "") -> bool:
+    """Return whether OCR text looks like clock/date/noise rather than task content."""
     norm = norm_text(text)
     if not norm:
         return True
-    return any(fragment in norm for fragment in AMBIENT_OCR_FRAGMENTS)
+    if any(fragment in norm for fragment in AMBIENT_DATE_TIME_FRAGMENTS):
+        return True
+    # Check-in text outside comms apps is usually notification bleed, not the active task.
+    if OcrSignal.CHECK_IN in norm and app not in COMMS_APPS:
+        return True
+    return False
 
 
 def is_menu_bar_token(text: str) -> bool:
@@ -122,12 +130,20 @@ def detect_work_tracking_context(ocr_text: str) -> bool:
     return any(signal in haystack for signal in WORK_TRACKING_SIGNALS)
 
 
+def detect_video_call_sidebar(ocr_text: str) -> bool:
+    """Return whether OCR suggests a video-call sidebar alongside other UI."""
+    haystack = ocr_text.lower()
+    return bool(re.search(r"\bcam\b", haystack)) and detect_work_tracking_context(haystack)
+
+
 def suggests_multitasking_during_call(ocr_text: str) -> bool:
     """Return whether OCR suggests work UI open alongside a likely call."""
     haystack = ocr_text.lower()
     has_work = detect_work_tracking_context(haystack)
     has_meeting = detect_meeting_context(haystack)
     if has_work and has_meeting:
+        return True
+    if has_work and detect_video_call_sidebar(haystack):
         return True
     return (
         has_work
@@ -220,6 +236,42 @@ def generic_title_skip_tokens(app: str) -> set[str]:
     return generic
 
 
+def pick_browser_context_title(ocr_lines: list[str]) -> str | None:
+    """Pick a browser window title from visible page/tab content signals."""
+    haystack = " ".join(ocr_lines).lower()
+    for signal, label in BROWSER_CONTEXT_TITLE_SIGNALS:
+        if signal not in haystack:
+            continue
+        for line in ocr_lines:
+            line_norm = norm_text(line)
+            if signal in line_norm:
+                if signal in {OcrSignal.ICLOUD, OcrSignal.YOUTUBE, OcrSignal.TABS}:
+                    return label
+                return line.strip()[:80]
+        return label
+    return None
+
+
+def is_garbled_work_tracking_title(text: str) -> bool:
+    """Return whether a title looks like OCR noise rather than a readable page title."""
+    norm = norm_text(text)
+    if not norm:
+        return True
+    if "/" in text and OcrSignal.LINEAR in norm:
+        return True
+    if len(norm) > 24 and not any(
+        keyword in norm
+        for keyword in (
+            OcrSignal.ISSUES,
+            OcrSignal.WORKFLOW,
+            OcrSignal.WORKFLOW_RUNS,
+            OcrSignal.CAMPAIGNS,
+        )
+    ):
+        return True
+    return False
+
+
 def score_window_title_candidate(line: str, app: str, ocr_lines: list[str]) -> float:
     """Score one OCR line as a window-title candidate."""
     app_norm = norm_text(app)
@@ -234,7 +286,7 @@ def score_window_title_candidate(line: str, app: str, ocr_lines: list[str]) -> f
         score += TitleScoreWeight.MULTI_WORD_BONUS
     if any(keyword in norm for keyword in TITLE_KEYWORD_BONUSES):
         score += TitleScoreWeight.KEYWORD_BONUS
-    if is_ambient_ocr_fragment(norm):
+    if is_ambient_ocr_fragment(norm, app):
         score -= TitleScoreWeight.AMBIENT_PENALTY
     if any(ch.isdigit() for ch in norm):
         score -= TitleScoreWeight.DIGIT_PENALTY
@@ -250,9 +302,28 @@ def score_window_title_candidate(line: str, app: str, ocr_lines: list[str]) -> f
             score -= TitleScoreWeight.CURSOR_CHECK_IN_PENALTY
         if norm == AppSlug.CURSOR:
             score += TitleScoreWeight.CURSOR_APP_NAME_BONUS
-    if app_norm == AppSlug.SAFARI and any(token in norm for token in SAFARI_TITLE_KEYWORD_BONUSES):
-        score += TitleScoreWeight.SAFARI_WORK_UI_BONUS
+    if app_norm == AppSlug.SAFARI:
+        if OcrSignal.CHECK_IN in norm:
+            score -= TitleScoreWeight.NOTIFICATION_BLEED_PENALTY
+        if any(token in norm for token in SAFARI_TITLE_KEYWORD_BONUSES):
+            score += TitleScoreWeight.SAFARI_WORK_UI_BONUS
+        elif len(norm) >= TitleScoreWeight.MIN_TITLE_LENGTH:
+            score -= TitleScoreWeight.SAFARI_NON_CONTEXT_PENALTY
     return score
+
+
+def _is_weak_browser_window_title(text: str) -> bool:
+    """Return whether a browser window title looks like OCR junk rather than page content."""
+    norm = norm_text(text)
+    if not norm:
+        return True
+    if norm in {AppSlug.SAFARI, norm_text(BrowserLabel.SAFARI), norm_text(BrowserLabel.CHROME)}:
+        return False
+    if any(keyword in norm for keyword in SAFARI_TITLE_KEYWORD_BONUSES):
+        return False
+    if detect_browser_content(norm):
+        return False
+    return is_low_signal_title(text, App.SAFARI) or len(norm) < 18
 
 
 def choose_window_title_from_ocr(app: str, ocr_lines: list[str]) -> str:
@@ -271,10 +342,23 @@ def choose_window_title_from_ocr(app: str, ocr_lines: list[str]) -> str:
     best = candidates[0][1][:80]
     best_norm = norm_text(best)
 
+    if app in BROWSER_APPS:
+        context_title = pick_browser_context_title(ocr_lines)
+        if context_title and (
+            _is_weak_browser_window_title(best)
+            or not any(token in best_norm for token in SAFARI_TITLE_KEYWORD_BONUSES)
+        ):
+            return context_title
+
     if app_norm == AppSlug.CURSOR and is_ambient_ocr_fragment(best):
         return app if app and app != Placeholder.UNKNOWN else best
     if app_norm == AppSlug.ZOOM_WORKPLACE and best_norm == OcrSignal.WORKPLACE:
         return Task.MEETING
+    if app in BROWSER_APPS and _is_weak_browser_window_title(best):
+        context_title = pick_browser_context_title(ocr_lines)
+        if context_title:
+            return context_title
+        return infer_browser_label(" ".join(ocr_lines).lower()) or App.SAFARI
     if app in NON_BROWSER_FRONTMOST_APPS and is_low_signal_title(best, app):
         return infer_browser_label(" ".join(ocr_lines).lower()) or default_browser_label()
     return best
@@ -364,6 +448,14 @@ def refine_summary_and_task(
     if app in CODING_APPS and norm_text(summary) in DevUiToken.ALL:
         summary = SummaryPhrase.coding_in_app(app)
 
+    if app in BROWSER_APPS and (
+        _is_weak_browser_window_title(summary)
+        or _is_weak_browser_window_title(window_title)
+        or norm_text(summary) == norm_text(app)
+        or norm_text(window_title) == norm_text(app)
+    ):
+        summary = SummaryPhrase.browsing_in_app(app)
+
     if has_dual_context(app, ocr_text, clues, ocr_lines):
         browser = infer_browser_label(ocr_text, clues) or default_browser_label()
         summary = SummaryPhrase.browsing_with_frontmost(browser, app)
@@ -372,13 +464,29 @@ def refine_summary_and_task(
 
     if detect_work_tracking_context(ocr_text):
         label = infer_work_tracking_label(ocr_text)
-        if suggests_multitasking_during_call(ocr_text):
+        multitasking = suggests_multitasking_during_call(ocr_text)
+        if multitasking:
             task = Task.MEETING
         base = window_title if window_title not in {Placeholder.EMPTY, Placeholder.UNKNOWN} else summary
-        if label and norm_text(label) not in norm_text(base):
+        if (
+            label
+            and label != WorkTrackingLabel.GENERIC
+            and multitasking
+            and "zoom" not in norm_text(base)
+        ):
+            summary = SummaryPhrase.work_items_during_call(label, app)
+        elif label and label != WorkTrackingLabel.GENERIC and (
+            is_garbled_work_tracking_title(base)
+            or _is_weak_browser_window_title(base)
+        ):
+            if multitasking:
+                summary = SummaryPhrase.work_items_during_call(label, app)
+            else:
+                summary = SummaryPhrase.work_issues_in_app(label, app)
+        elif label and norm_text(label) not in norm_text(base):
             summary = SummaryPhrase.labeled_work_item(label, base)
-        if app in BROWSER_APPS and " in " not in norm_text(summary):
-            summary = SummaryPhrase.title_in_app(summary, app)
+            if app in BROWSER_APPS and " in " not in norm_text(summary):
+                summary = SummaryPhrase.title_in_app(summary, app)
 
     summary = summary.strip() or fallback_summary_for_app(app, window_title, task, ocr_text)
     return SummaryRefinement(summary=summary[:160], coarse_task=task)
@@ -388,13 +496,8 @@ def infer_app_from_content(window_title: str, ocr_lines: list[str]) -> str:
     """Infer application name from window title and OCR content."""
     combined_text = " ".join([window_title] + ocr_lines).lower()
 
-    draw_rule = next(rule for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.DRAW_THINGS)
-    if any(keyword in combined_text for keyword in draw_rule.keywords) or (
-        MenuToken.DRAW in combined_text
-        and MenuToken.IMAGE in combined_text
-        and MenuToken.WINDOW in combined_text
-    ):
-        return draw_rule.app
+    if detect_browser_content(combined_text):
+        return App.SAFARI
 
     if OcrSignal.ZOOM in combined_text and (
         OcrSignal.WORKPLACE in combined_text or OcrSignal.MEETING in combined_text
@@ -402,8 +505,6 @@ def infer_app_from_content(window_title: str, ocr_lines: list[str]) -> str:
         return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.ZOOM_WORKPLACE)
 
     for rule in APP_INFERENCE_RULES:
-        if rule.slug == AppSlug.DRAW_THINGS:
-            continue
         if any(keyword in combined_text for keyword in rule.keywords):
             return rule.app
 

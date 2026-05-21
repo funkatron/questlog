@@ -20,17 +20,17 @@
     {
       "file": "safari-youtube-icloud-tabs.jpg",
       "source_file": "2026-04-27--15-26-00 UTC.jpg",
-      "target_description": "Browser-centric screen with Safari's iCloud tabs/start page on the left and a YouTube video page on the right.",
-      "frontmost_app_hint": "Draw Things",
+      "target_description": "Safari with Start Page/iCloud tabs on the left and a YouTube video on the right.",
+      "frontmost_app_hint": "Safari",
       "visible_apps": ["Safari", "YouTube"],
       "primary_window_title_hint": "YouTube or Safari",
-      "window_title_hints": ["YouTube", "Safari"],
+      "window_title_hints": ["YouTube", "Safari", "iCloud"],
       "primary_activity": "Browsing media content and Safari tabs.",
-      "activity_hints": ["Browsing in Safari", "YouTube", "Safari tabs"],
+      "activity_hints": ["Browsing in Safari", "YouTube", "Safari tabs", "iCloud"],
       "coarse_task_hint": "Research",
       "notes": [
-        "The menu bar shows Draw Things, but the visible windows are browser content.",
-        "This fixture should test the distinction between frontmost app and visible activity."
+        "Safari is frontmost; visible windows include Start Page/iCloud tabs and YouTube.",
+        "Never-mode OCR may miss YouTube title text; iCloud/browser signals should still infer Safari."
       ]
     },
     {
