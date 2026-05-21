@@ -597,7 +597,7 @@ def eval_fixtures(
     ),
 ) -> None:
     """Run the processing pipeline against local fixtures and compare to targets."""
-    cfg = load_config()
+    cfg = load_config(auto_create=True)
     setup_logging(cfg, debug=True)
 
     fixture_dir = Path(directory)
