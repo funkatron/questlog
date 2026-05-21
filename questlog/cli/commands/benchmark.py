@@ -3,7 +3,6 @@
 import datetime as dt
 import json
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -11,6 +10,7 @@ import typer
 
 from questlog.config import load_config
 from questlog.services import DatabaseService, ImageService, setup_logging
+from questlog.services.fixture_eval import evaluate_fixtures, format_fixture_report
 
 # Create command group
 app = typer.Typer(name="benchmark", help="Benchmark and debug tools")
@@ -576,155 +576,6 @@ def _generate_period_summary(benchmark_files: List[Path], period_start: dt.datet
     return "\n".join(lines)
 
 
-def _norm_text(value: str) -> str:
-    """Normalize text for loose fixture matching."""
-    return " ".join((value or "").strip().lower().split())
-
-
-def _expand_expected_values(value: str) -> List[str]:
-    """Expand loose alternatives like 'Safari or browser' into matchable values."""
-    norm = (value or "").strip()
-    if not norm:
-        return []
-    parts = [norm]
-    if " or " in norm.lower():
-        parts.extend(part.strip() for part in norm.split(" or ") if part.strip())
-    return parts
-
-
-def _contains_any(haystack: str, needles: List[str]) -> bool:
-    """Whether normalized haystack contains any normalized needle."""
-    norm_haystack = _norm_text(haystack)
-    expanded = []
-    for needle in needles:
-        expanded.extend(_expand_expected_values(needle))
-    return any(_norm_text(needle) in norm_haystack for needle in expanded if needle)
-
-
-def _evaluate_fixture_result(target: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
-    """Compare one fixture result to its target expectations."""
-    checks = []
-
-    app_expected = [target.get("frontmost_app_hint", "")]
-    checks.append({
-        "name": "app",
-        "passed": _contains_any(result.get("app", ""), app_expected),
-        "expected": target.get("frontmost_app_hint", ""),
-        "actual": result.get("app", ""),
-    })
-
-    visible_expected = list(target.get("visible_apps", []))
-    visible_actual = " ".join(
-        [
-            result.get("app", ""),
-            result.get("window_title", ""),
-            result.get("summary", ""),
-        ]
-    )
-    checks.append({
-        "name": "visible_apps",
-        "passed": _contains_any(visible_actual, visible_expected),
-        "expected": ", ".join(visible_expected),
-        "actual": visible_actual,
-    })
-
-    title_expected = [target.get("primary_window_title_hint", "")]
-    title_expected.extend(target.get("window_title_hints", []))
-    checks.append({
-        "name": "window_title",
-        "passed": _contains_any(result.get("window_title", ""), title_expected),
-        "expected": target.get("primary_window_title_hint", ""),
-        "actual": result.get("window_title", ""),
-    })
-
-    activity_expected = [target.get("primary_activity", ""), target.get("target_description", "")]
-    activity_expected.extend(target.get("activity_hints", []))
-    activity_actual = " ".join([result.get("summary", ""), result.get("window_title", "")])
-    checks.append({
-        "name": "activity",
-        "passed": _contains_any(activity_actual, activity_expected),
-        "expected": target.get("primary_activity", ""),
-        "actual": result.get("summary", ""),
-    })
-
-    task_expected = [target.get("coarse_task_hint", "")]
-    checks.append({
-        "name": "task",
-        "passed": _contains_any(result.get("coarse_task", ""), task_expected),
-        "expected": target.get("coarse_task_hint", ""),
-        "actual": result.get("coarse_task", ""),
-    })
-
-    passed = sum(1 for check in checks if check["passed"])
-    return {
-        "passed_checks": passed,
-        "total_checks": len(checks),
-        "checks": checks,
-    }
-
-
-def _run_process_image_mode(
-    image_path: Path,
-    cfg,
-    *,
-    mode: str,
-) -> Dict[str, Any]:
-    """Run the current processing pipeline for one fixture and return the stored row."""
-    import ql.processing as qlp
-
-    mode_kwargs = {
-        "never": dict(
-            use_vision_analysis=False,
-            use_llm_summarization=False,
-            vision_fallback_on_low_confidence=False,
-        ),
-        "auto": dict(
-            use_vision_analysis=True,
-            use_llm_summarization=False,
-            vision_fallback_on_low_confidence=True,
-        ),
-        "always": dict(
-            use_vision_analysis=True,
-            use_llm_summarization=False,
-            vision_fallback_on_low_confidence=False,
-        ),
-    }
-    if mode not in mode_kwargs:
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    with tempfile.TemporaryDirectory(prefix="questlog-fixture-") as tmpdir:
-        db_service = DatabaseService(db_path=Path(tmpdir) / "fixtures.db")
-        db_service.ensure_schema()
-        with db_service.connect() as conn:
-            started = dt.datetime.now()
-            timer_start = dt.datetime.now().timestamp()
-            entry_id = qlp.process_image(
-                conn,
-                cfg.to_dict(),
-                image_path,
-                use_app_detection=False,
-                **mode_kwargs[mode],
-            )
-            elapsed = dt.datetime.now().timestamp() - timer_start
-            row = conn.execute(
-                "select app, window_title, project, coarse_task, summary, confidence from entries where id=?",
-                (entry_id,),
-            ).fetchone()
-
-    return {
-        "file": image_path.name,
-        "mode": mode,
-        "seconds": round(elapsed, 2),
-        "app": row[0],
-        "window_title": row[1],
-        "project": row[2],
-        "coarse_task": row[3],
-        "summary": row[4],
-        "confidence": row[5],
-        "evaluated_at": started.isoformat(timespec="seconds"),
-    }
-
-
 @app.command(name="eval-fixtures")
 def eval_fixtures(
     directory: str = typer.Option(
@@ -746,7 +597,7 @@ def eval_fixtures(
     ),
 ) -> None:
     """Run the processing pipeline against local fixtures and compare to targets."""
-    cfg = load_config()
+    cfg = load_config(auto_create=True)
     setup_logging(cfg, debug=True)
 
     fixture_dir = Path(directory)
@@ -763,77 +614,21 @@ def eval_fixtures(
         typer.echo("Invalid --mode. Expected one of: never, auto, always.", err=True)
         raise typer.Exit(2)
 
-    manifest = json.loads(targets_path.read_text())
-    fixtures = manifest.get("fixtures", [])
-    if not fixtures:
-        typer.echo(f"No fixtures found in {targets_path}", err=True)
-        raise typer.Exit(1)
-
-    results = []
-    for fixture in fixtures:
+    for fixture in json.loads(targets_path.read_text()).get("fixtures", []):
         image_path = fixture_dir / fixture["file"]
         if not image_path.exists():
             typer.echo(f"Missing fixture image: {image_path}", err=True)
             raise typer.Exit(1)
         typer.echo(f"Evaluating {image_path.name} ({mode})...")
-        result = _run_process_image_mode(image_path, cfg, mode=mode)
-        evaluation = _evaluate_fixture_result(fixture, result)
-        results.append({
-            "target": fixture,
-            "result": result,
-            "evaluation": evaluation,
-        })
 
-    total_checks = sum(item["evaluation"]["total_checks"] for item in results)
-    passed_checks = sum(item["evaluation"]["passed_checks"] for item in results)
-
-    lines = []
-    lines.append(f"# Fixture Evaluation ({mode})")
-    lines.append("")
-    lines.append(f"**Generated:** {dt.datetime.now().astimezone().isoformat(timespec='seconds')}")
-    lines.append(f"**Fixture Dir:** `{fixture_dir}`")
-    lines.append(f"**Checks Passed:** {passed_checks}/{total_checks}")
-    lines.append("")
-    lines.append("| Fixture | Score | Seconds | App | Task | Summary |")
-    lines.append("| --- | --- | ---: | --- | --- | --- |")
-
-    for item in results:
-        result = item["result"]
-        evaluation = item["evaluation"]
-        lines.append(
-            f"| `{result['file']}` | {evaluation['passed_checks']}/{evaluation['total_checks']} | "
-            f"{result['seconds']:.2f} | {result['app']} | {result['coarse_task']} | {result['summary'][:80]} |"
-        )
-
-    lines.append("")
-    for item in results:
-        target = item["target"]
-        result = item["result"]
-        evaluation = item["evaluation"]
-        lines.append(f"## {result['file']}")
-        lines.append("")
-        lines.append(f"**Target:** {target['target_description']}")
-        lines.append(f"**Observed:** app=`{result['app']}`, title=`{result['window_title']}`, task=`{result['coarse_task']}`, confidence={result['confidence']}")
-        lines.append(f"**Summary:** {result['summary']}")
-        lines.append("")
-        lines.append("| Check | Status | Expected | Actual |")
-        lines.append("| --- | --- | --- | --- |")
-        for check in evaluation["checks"]:
-            status = "PASS" if check["passed"] else "FAIL"
-            lines.append(
-                f"| {check['name']} | {status} | {check['expected']} | {check['actual']} |"
-            )
-        if target.get("notes"):
-            lines.append("")
-            lines.append("Notes:")
-            for note in target["notes"]:
-                lines.append(f"- {note}")
-        lines.append("")
-
+    report = evaluate_fixtures(fixture_dir, cfg, mode=mode)
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines))
-    typer.echo(f"Wrote fixture evaluation report: {output_path}")
+    output_path.write_text(format_fixture_report(report))
+    typer.echo(
+        f"Wrote fixture evaluation report: {output_path} "
+        f"({report['passed_checks']}/{report['total_checks']} checks passed)"
+    )
 
 
 @app.command()

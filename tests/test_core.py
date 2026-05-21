@@ -8,11 +8,11 @@ sys.path.insert(0, str(_P(__file__).resolve().parents[1]))
 from ql import processing as qlp
 from ql import system as qls
 from ql.text import redact, extract_clues
+from ql.project import resolve_project
 from ql.processing import (
     calibrate_confidence,
     normalize_app,
     normalize_window_title,
-    resolve_project,
     process_image,
     validate_task,
 )

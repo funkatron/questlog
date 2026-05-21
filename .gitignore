@@ -44,8 +44,5 @@ dist/
 *.egg-info/
 questlog.egg-info/
 
-# Test fixtures (avoid committing screenshots)
+# Test fixtures (non-LFS)
 tests/fixtures/*.png
-tests/fixtures/screenshots/*.jpg
-tests/fixtures/screenshots/*.jpeg
-tests/fixtures/screenshots/*.png

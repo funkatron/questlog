@@ -13,6 +13,7 @@ from ql.state_probes import (
     gather_state_probes,
     is_path_allowed,
     probe_git_repository,
+    registered_probe_names,
     resolve_allowed_roots,
 )
 from questlog.services import DatabaseService, ResumeService
@@ -200,3 +201,7 @@ def test_resume_omits_local_state_when_probes_disabled(tmp_path):
 
     assert data["local_state"] == []
     assert "Local state" not in ResumeService(cfg).render_text(data)
+
+
+def test_git_probe_is_registered_by_default():
+    assert "git" in registered_probe_names()

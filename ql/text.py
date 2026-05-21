@@ -7,6 +7,8 @@ import os
 import re
 from typing import List, Dict, Any, Optional
 
+from ql.vocabulary import OCR_CONTEXT_PRESERVE_SIGNALS
+
 
 # Regular expressions for privacy-sensitive patterns
 RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -64,6 +66,10 @@ def filter_ocr_cruft(lines: List[str]) -> List[str]:
     """
     filtered = []
 
+    def _line_has_context_signal(line: str) -> bool:
+        lower = line.lower()
+        return any(signal in lower for signal in OCR_CONTEXT_PRESERVE_SIGNALS)
+
     # Patterns to filter out
     menu_patterns = [
         r"^(File|Edit|View|History|Bookmarks|Develop|Window|Help|Go|Format|Insert|Tools|Window|Help)",
@@ -78,6 +84,10 @@ def filter_ocr_cruft(lines: List[str]) -> List[str]:
     for line in lines:
         line_stripped = line.strip()
         if not line_stripped:
+            continue
+
+        if _line_has_context_signal(line_stripped):
+            filtered.append(line_stripped)
             continue
 
         # Skip if matches any filter pattern
@@ -150,13 +160,6 @@ def filter_ocr_cruft(lines: List[str]) -> List[str]:
 
         # Skip lines with excessive symbol density (more than 1 symbol per 3 chars)
         if total_chars > 15 and symbols > total_chars / 3:
-            continue
-
-        # Skip lines that look like app/service names mixed with symbols
-        # e.g., "SABNZB4 © Sonarr _[) Studioworks: ative studios Radarr_ @ grayfox..."
-        service_patterns = ['sonarr', 'radarr', 'plex', 'synology', 'icloud', 'amazon']
-        has_service = any(pattern in line_stripped.lower() for pattern in service_patterns)
-        if has_service and symbols > letters:
             continue
 
         # Final check: if line is "garbled" (too many symbols interspersed), skip it

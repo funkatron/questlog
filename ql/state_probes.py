@@ -4,7 +4,42 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
+
+
+class StateProbe(Protocol):
+    """Read-only probe that enriches restart notes from local filesystem state."""
+
+    name: str
+
+    def probe(
+        self,
+        artifacts: list[str],
+        clues: dict[str, Any] | None,
+        *,
+        allowed_roots: list[Path],
+        max_items: int,
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        """Return zero or more probe result records."""
+
+
+ProbeFn = Callable[
+    [list[str], dict[str, Any] | None, list[Path], int, float],
+    list[dict[str, Any]],
+]
+
+_PROBE_REGISTRY: dict[str, ProbeFn] = {}
+
+
+def register_probe(name: str, probe_fn: ProbeFn) -> None:
+    """Register a named state probe implementation."""
+    _PROBE_REGISTRY[name] = probe_fn
+
+
+def registered_probe_names() -> list[str]:
+    """Return registered probe names in registration order."""
+    return list(_PROBE_REGISTRY.keys())
 
 
 def default_allowed_roots() -> list[Path]:
@@ -182,17 +217,44 @@ def gather_state_probes(
     allowed_roots: list[Path] | None = None,
     max_repos: int = 2,
     timeout_seconds: float = 5.0,
+    probe_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Gather read-only local git state for restart-note enrichment."""
+    """Gather read-only local state for restart-note enrichment."""
     if not enabled:
         return []
 
     roots = allowed_roots or default_allowed_roots()
+    names = probe_names or registered_probe_names()
+    probes: list[dict[str, Any]] = []
+    for name in names:
+        probe_fn = _PROBE_REGISTRY.get(name)
+        if probe_fn is None:
+            continue
+        probes.extend(
+            probe_fn(
+                artifacts,
+                clues,
+                roots,
+                max_repos,
+                timeout_seconds,
+            )
+        )
+    return probes
+
+
+def _gather_git_probes(
+    artifacts: list[str],
+    clues: dict[str, Any] | None,
+    allowed_roots: list[Path],
+    max_repos: int,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    """Git probe adapter for the probe registry."""
     repo_roots: list[Path] = []
     seen_repos: set[str] = set()
 
     for candidate in collect_probe_candidates(artifacts, clues):
-        if not is_path_allowed(candidate, roots):
+        if not is_path_allowed(candidate, allowed_roots):
             continue
         git_root = find_git_root(candidate)
         if git_root is None:
@@ -207,10 +269,13 @@ def gather_state_probes(
 
     probes: list[dict[str, Any]] = []
     for repo_root in repo_roots:
-        probes.append(
-            probe_git_repository(repo_root, timeout=timeout_seconds)
-        )
+        result = probe_git_repository(repo_root, timeout=timeout_seconds)
+        result["probe"] = "git"
+        probes.append(result)
     return probes
+
+
+register_probe("git", _gather_git_probes)
 
 
 def format_probe_summary(probe: dict[str, Any]) -> str:

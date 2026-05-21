@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from questlog.cli.commands.benchmark import _evaluate_fixture_result
+from questlog.services.fixture_eval import evaluate_fixture_result
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "screenshots"
@@ -43,7 +43,7 @@ def test_evaluate_fixture_result_passes_on_ideal_output():
         "summary": target["primary_activity"],
         "confidence": 0.9,
     }
-    evaluation = _evaluate_fixture_result(target, result)
+    evaluation = evaluate_fixture_result(target, result)
     assert evaluation["passed_checks"] == evaluation["total_checks"]
 
 
@@ -57,7 +57,7 @@ def test_evaluate_fixture_result_flags_wrong_app():
         "summary": target["primary_activity"],
         "confidence": 0.9,
     }
-    evaluation = _evaluate_fixture_result(target, result)
+    evaluation = evaluate_fixture_result(target, result)
     app_check = next(check for check in evaluation["checks"] if check["name"] == "app")
     assert app_check["passed"] is False
 
@@ -118,7 +118,7 @@ def test_fixture_pipeline_never_mode_writes_entry(tmp_path, monkeypatch):
         ).fetchone()
 
     assert row is not None
-    evaluation = _evaluate_fixture_result(
+    evaluation = evaluate_fixture_result(
         fixture,
         {
             "app": row[0],
