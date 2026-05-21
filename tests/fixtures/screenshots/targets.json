@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "file": "slack-checkin-message.jpg",
+      "source_file": "2026-04-27--15-25-00 UTC.jpg",
+      "target_description": "Slack window showing an internal check-in style conversation or message thread.",
+      "frontmost_app_hint": "Slack",
+      "visible_apps": ["Slack"],
+      "primary_window_title_hint": "Slack",
+      "window_title_hints": ["Slack", "check in"],
+      "primary_activity": "Reading or participating in a Slack check-in conversation.",
+      "activity_hints": ["Slack check-in", "check in conversation", "WBD internal check in"],
+      "coarse_task_hint": "Comms",
+      "notes": [
+        "This is an easy OCR-first baseline case.",
+        "Model output should stay grounded and not invent other apps or meetings."
+      ]
+    },
+    {
+      "file": "safari-youtube-icloud-tabs.jpg",
+      "source_file": "2026-04-27--15-26-00 UTC.jpg",
+      "target_description": "Browser-centric screen with Safari's iCloud tabs/start page on the left and a YouTube video page on the right.",
+      "frontmost_app_hint": "Draw Things",
+      "visible_apps": ["Safari", "YouTube"],
+      "primary_window_title_hint": "YouTube or Safari",
+      "window_title_hints": ["YouTube", "Safari"],
+      "primary_activity": "Browsing media content and Safari tabs.",
+      "activity_hints": ["Browsing in Safari", "YouTube", "Safari tabs"],
+      "coarse_task_hint": "Research",
+      "notes": [
+        "The menu bar shows Draw Things, but the visible windows are browser content.",
+        "This fixture should test the distinction between frontmost app and visible activity."
+      ]
+    },
+    {
+      "file": "zoom-workplace-linear.jpg",
+      "source_file": "2026-04-27--15-32-09 UTC.jpg",
+      "target_description": "Zoom Workplace meeting with participant strip visible above a Linear issues view.",
+      "frontmost_app_hint": "Zoom Workplace",
+      "visible_apps": ["Zoom Workplace", "Linear"],
+      "primary_window_title_hint": "Meeting",
+      "window_title_hints": ["Meeting", "Zoom"],
+      "primary_activity": "Participating in a Zoom meeting while viewing Linear issues.",
+      "activity_hints": ["Meeting in Zoom Workplace", "Zoom meeting", "Linear issues"],
+      "coarse_task_hint": "Meeting",
+      "notes": [
+        "A good result may mention both Zoom and Linear.",
+        "Misclassifying this as generic browser research is a failure."
+      ]
+    },
+    {
+      "file": "cursor-editor-terminal.jpg",
+      "source_file": "2026-04-27--15-34-09 UTC.jpg",
+      "target_description": "Cursor editor workspace with development controls and terminal-related UI elements.",
+      "frontmost_app_hint": "Cursor",
+      "visible_apps": ["Cursor"],
+      "primary_window_title_hint": "Cursor",
+      "window_title_hints": ["Cursor", "Terminal"],
+      "primary_activity": "Editing code or working in a development environment.",
+      "activity_hints": ["Coding in Cursor", "development environment", "Editing code"],
+      "coarse_task_hint": "Coding",
+      "notes": [
+        "A good result should prefer coding/development language.",
+        "Mentioning unrelated meetings is a hallucination."
+      ]
+    },
+    {
+      "file": "linear-issues-zoom-sidebar.jpg",
+      "source_file": "2026-04-27--15-35-09 UTC.jpg",
+      "target_description": "Linear issues list in a browser with a Zoom participant sidebar on the right.",
+      "frontmost_app_hint": "Safari or browser",
+      "visible_apps": ["Linear", "Zoom"],
+      "primary_window_title_hint": "Linear issues",
+      "window_title_hints": ["Linear", "Issues", "Workflow runs"],
+      "primary_activity": "Reviewing or managing work items while on a Zoom call.",
+      "activity_hints": ["Workflow runs in Safari", "Linear issues", "Zoom call"],
+      "coarse_task_hint": "Meeting",
+      "notes": [
+        "A good result should identify Linear/work tracking as the main visible content.",
+        "This is different from the YouTube/browser fixture and should not collapse into generic browsing."
+      ]
+    }
+  ]
+}

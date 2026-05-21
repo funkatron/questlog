@@ -230,6 +230,16 @@ def watch() -> None:
 def backfill(
     days: Optional[int] = typer.Option(None, "--days", "-d", help="Only process last N days"),
     today: bool = typer.Option(False, "--today", help="Only process today's images"),
+    vision_mode: str = typer.Option(
+        "auto",
+        "--vision-mode",
+        help="Vision policy for backfill: never, auto, or always",
+    ),
+    llm_summary: bool = typer.Option(
+        False,
+        "--llm-summary/--no-llm-summary",
+        help="Use LLM text summarization during backfill when vision is disabled",
+    ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging and show OCR output"),
 ) -> None:
     """Scan historical screenshots and index them."""
@@ -253,6 +263,18 @@ def backfill(
 
     started = time.monotonic()
     last_heartbeat = started
+
+    vision_mode = vision_mode.lower().strip()
+    if vision_mode not in {"never", "auto", "always"}:
+        typer.echo("Invalid --vision-mode. Expected one of: never, auto, always.", err=True)
+        raise typer.Exit(2)
+
+    if vision_mode == "never":
+        typer.echo("Backfill mode: fast OCR-only pipeline (vision disabled)")
+    elif vision_mode == "auto":
+        typer.echo("Backfill mode: OCR-first with vision fallback for low-confidence entries")
+    elif not llm_summary:
+        typer.echo("Backfill mode: vision on every image, LLM summarization fallback disabled")
 
     with db_service.connect() as conn:
         count = 0
@@ -291,7 +313,14 @@ def backfill(
                     logger.debug("Processing: %s", p)
 
                 # Historical screenshots: skip app detection, infer from content
-                image_service.process_image(conn, p, use_app_detection=False)
+                image_service.process_image(
+                    conn,
+                    p,
+                    use_app_detection=False,
+                    use_vision_analysis=vision_mode != "never",
+                    use_llm_summarization=llm_summary,
+                    vision_fallback_on_low_confidence=vision_mode == "auto",
+                )
                 count += 1
                 if debug:
                     typer.echo(f"✓ Processed {p.name} ({count} total)")
@@ -325,3 +354,128 @@ def backfill(
             f"(scanned {scanned}). See {cfg.logfile} for details."
         )
 
+
+@app.command()
+def enrich(
+    days: Optional[int] = typer.Option(None, "--days", "-d", help="Only enrich entries from last N days"),
+    today: bool = typer.Option(False, "--today", help="Only enrich today's entries"),
+    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Maximum entries to enrich"),
+    only_low_confidence: bool = typer.Option(
+        True,
+        "--only-low-confidence/--all",
+        help="Only enrich uncertain entries by default; use --all to revisit every entry in scope",
+    ),
+    vision_mode: str = typer.Option(
+        "always",
+        "--vision-mode",
+        help="Detail policy: auto or always",
+    ),
+    llm_summary: bool = typer.Option(
+        False,
+        "--llm-summary/--no-llm-summary",
+        help="Use LLM text summarization during enrichment when vision does not provide a summary",
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Revisit already-indexed screenshots and update entries with richer detail."""
+    cfg = load_config()
+    setup_logging(cfg, debug=debug)
+    db_service = DatabaseService()
+    image_service = ImageService(cfg)
+    db_service.ensure_schema()
+
+    vision_mode = vision_mode.lower().strip()
+    if vision_mode not in {"auto", "always"}:
+        typer.echo("Invalid --vision-mode. Expected one of: auto, always.", err=True)
+        raise typer.Exit(2)
+
+    today_date = dt.date.today().isoformat() if today else None
+    cutoff = None if days is None else time.time() - (days * 86400)
+    confidence_floor = max(float(cfg.confidence_threshold), 0.75)
+
+    typer.echo(
+        "Enriching indexed screenshots "
+        f"({vision_mode=}, only_low_confidence={only_low_confidence}, llm_summary={llm_summary})"
+    )
+
+    started = time.monotonic()
+    last_heartbeat = started
+    scanned = 0
+    enriched = 0
+    skipped = 0
+
+    with db_service.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT f.path, f.mtime, f.entry_id, e.confidence, e.app, e.window_title, e.coarse_task
+            FROM files f
+            JOIN entries e ON e.id = f.entry_id
+            ORDER BY e.ts ASC
+            """
+        ).fetchall()
+
+        for row in rows:
+            scanned += 1
+            if limit is not None and enriched >= limit:
+                break
+
+            path = Path(row["path"])
+            if not path.exists() or path.suffix.lower() not in IMAGE_EXTS:
+                skipped += 1
+                continue
+            if today_date and path.parent.name != today_date:
+                skipped += 1
+                continue
+            if cutoff and float(row["mtime"]) < cutoff:
+                skipped += 1
+                continue
+            if only_low_confidence:
+                confidence = float(row["confidence"] or 0.0)
+                if (
+                    confidence >= confidence_floor
+                    and row["app"] != "Unknown"
+                    and row["window_title"] != "Unknown"
+                    and row["coarse_task"] != "Unknown"
+                ):
+                    skipped += 1
+                    continue
+
+            try:
+                image_service.process_image(
+                    conn,
+                    path,
+                    use_app_detection=False,
+                    use_vision_analysis=True,
+                    use_llm_summarization=llm_summary,
+                    vision_fallback_on_low_confidence=vision_mode == "auto",
+                    replace_entry_id=int(row["entry_id"]),
+                )
+                enriched += 1
+                if debug:
+                    typer.echo(f"✓ Enriched {path.name} (entry_id={row['entry_id']})")
+                elif enriched % 25 == 0:
+                    typer.echo(f"Enriched {enriched} entries...")
+            except Exception as e:
+                logger.error("enrich error on %s: %s", path, e)
+                if debug:
+                    typer.echo(f"✗ Error enriching {path.name}: {e}", err=True)
+
+            now = time.monotonic()
+            if now - last_heartbeat >= _BACKFILL_HEARTBEAT_SEC:
+                elapsed = now - started
+                parts = [
+                    f"  ... {elapsed:.0f}s",
+                    f"scanned={scanned}",
+                    f"enriched={enriched}",
+                    f"skipped={skipped}",
+                ]
+                if enriched > 0:
+                    parts.append(f"~{elapsed / enriched:.0f}s avg per enriched")
+                typer.echo("  ".join(parts))
+                last_heartbeat = now
+
+    total_s = time.monotonic() - started
+    typer.echo(
+        f"Enrich complete in {total_s:.1f}s. Enriched {enriched} entries, skipped {skipped} "
+        f"(scanned {scanned}). See {cfg.logfile} for details."
+    )

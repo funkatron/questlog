@@ -77,3 +77,14 @@ class DatabaseService:
         """
         return qldb.insert_entry(conn, entry, evidence_text, file_path, mtime)
 
+    def update_entry(
+        self,
+        conn: sqlite3.Connection,
+        entry_id: int,
+        entry: dict,
+        evidence_text: str,
+        file_path: str,
+        mtime: float,
+    ) -> int:
+        """Update an existing entry in the database."""
+        return qldb.update_entry(conn, entry_id, entry, evidence_text, file_path, mtime)

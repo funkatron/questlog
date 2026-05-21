@@ -12,6 +12,11 @@ from typing import List, Dict, Any, Optional
 RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 RE_LONGNUM = re.compile(r"(?<!\d)(\d{4}[\s-]?){3}\d{4}(?!\d)")
 RE_URL = re.compile(r"https?://[^\s)>\]]+", re.IGNORECASE)
+RE_PHONE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}(?!\d)")
+RE_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*[^\s,;]+"
+)
+RE_URL_QUERY = re.compile(r"(https?://[^\s)>\]?]+)\?[^\s)>\]]+", re.IGNORECASE)
 
 
 def redact(text: str) -> str:
@@ -28,6 +33,15 @@ def redact(text: str) -> str:
     """
     text = RE_EMAIL.sub("[redacted-email]", text)
     text = RE_LONGNUM.sub("[redacted-num]", text)
+    text = RE_PHONE.sub("[redacted-phone]", text)
+    text = RE_SECRET_ASSIGNMENT.sub(lambda m: f"{m.group(1)}=[redacted-secret]", text)
+    return text
+
+
+def redact_for_display(text: str) -> str:
+    """Redact text before displaying it in user-facing restart notes."""
+    text = redact(text)
+    text = RE_URL_QUERY.sub(r"\1?[redacted-query]", text)
     return text
 
 
@@ -418,4 +432,3 @@ def build_historian_prompt(ocr_lines: List[str]) -> str:
         "Rules:\n- Be concrete and rely only on what's visible.\n- Do not infer editor/tool names unless visible; quote exact window/tab text when naming tools.\n- If something is unclear, say so under \"Uncertainties.\"\n- Keep the narrative precise and useful for future review.\n\n"
         f"OCR:\n{ocr_block}\n"
     )
-

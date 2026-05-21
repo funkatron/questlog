@@ -46,3 +46,6 @@ questlog.egg-info/
 
 # Test fixtures (avoid committing screenshots)
 tests/fixtures/*.png
+tests/fixtures/screenshots/*.jpg
+tests/fixtures/screenshots/*.jpeg
+tests/fixtures/screenshots/*.png

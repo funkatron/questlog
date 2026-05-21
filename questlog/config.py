@@ -44,6 +44,31 @@ class OllamaConfig(BaseModel):
     vision_analysis: OllamaVisionAnalysisConfig = Field(default_factory=OllamaVisionAnalysisConfig)
 
 
+class StateProbesConfig(BaseModel):
+    """Opt-in read-only local state inspection for restart notes."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Inspect nearby git repos when building restart notes",
+    )
+    allowed_roots: List[str] = Field(
+        default_factory=list,
+        description="Extra filesystem roots probes may inspect (defaults include cwd and home)",
+    )
+    max_repos: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Maximum number of git repositories to inspect per resume",
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=30.0,
+        description="Timeout for each git probe subprocess",
+    )
+
+
 class OpenAIConfig(BaseModel):
     """OpenAI API configuration."""
 
@@ -75,11 +100,18 @@ class QuestlogConfig(BaseModel):
     )
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    state_probes: StateProbesConfig = Field(default_factory=StateProbesConfig)
     confidence_threshold: float = Field(
         default=0.65,
         ge=0.0,
         le=1.0,
         description="Minimum confidence score for entries"
+    )
+    project_match_threshold: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fuzzy match score required to assign a project"
     )
     grace_gap_seconds: int = Field(
         default=120,
@@ -166,4 +198,3 @@ def load_config(config_path: Path | str | None = None, auto_create: bool = False
             )
 
     return QuestlogConfig.from_file(config_path)
-

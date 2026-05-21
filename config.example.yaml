@@ -16,6 +16,16 @@ blocklist_apps:
   - "1Password"
   - "Messages"
 
+# Matching below this score is treated as Unknown instead of guessed
+project_match_threshold: 0.70
+
+# Optional read-only local git probes for richer restart notes (off by default)
+state_probes:
+  enabled: false
+  allowed_roots: []
+  max_repos: 2
+  timeout_seconds: 5
+
 # Ollama configuration (optional)
 ollama:
   enabled: true
@@ -37,4 +47,3 @@ openai:
   enabled: false
   model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
-

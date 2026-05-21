@@ -208,20 +208,21 @@ class ExportService:
             for a in activities
         ])
 
-        prompt = f"""You are analyzing a one-hour work session. Generate a concise summary of what the user accomplished during this hour.
+        prompt = f"""You are writing a neutral restart brief for a one-hour activity window. Help the user recover context without judging their output or attention.
 
 Time Window: {start_time.strftime('%Y-%m-%d %H:00')} to {end_time.strftime('%H:00')}
 
 Activities ({len(activities)} entries):
 {activities_text}
 
-Generate a summary that:
-1. Identifies the main focus/theme of this hour
-2. Lists 3-5 key accomplishments or tasks completed
-3. Notes any context switches or transitions
-4. Estimates overall productivity/engagement level
+Generate a brief that:
+1. Identifies the main thread or theme
+2. Lists concrete work items, decisions, or artifacts visible in the activity
+3. Notes context switches or transitions neutrally
+4. Calls out possible open loops or unclear items
+5. Suggests one small restart point
 
-Format as a brief paragraph (3-5 sentences) followed by bullet points of key activities."""
+Avoid scores, attention judgments, or moral language. Format as a brief paragraph followed by bullets."""
 
         # Try LLM summarization
         cfg_dict = self.config.to_dict()
@@ -256,18 +257,24 @@ Format as a brief paragraph (3-5 sentences) followed by bullet points of key act
         apps = set(a.get("app") for a in activities if a.get("app"))
 
         summary_lines = [
-            f"Hour Summary: {start_time.strftime('%Y-%m-%d %H:00')} to {end_time.strftime('%H:00')}",
+            f"Restart Brief: {start_time.strftime('%Y-%m-%d %H:00')} to {end_time.strftime('%H:00')}",
             f"",
             f"Total activities: {len(activities)}",
             f"Projects: {', '.join(sorted(projects)) or 'Unknown'}",
             f"Tasks: {', '.join(sorted(tasks)) or 'Unknown'}",
             f"Apps: {', '.join(sorted(apps)) or 'Unknown'}",
             f"",
-            f"Activities:",
+            f"Recent activity:",
         ]
         summary_lines.extend([f"  {a['time']} - {a['summary']}" for a in activities[:10]])
         if len(activities) > 10:
             summary_lines.append(f"  ... and {len(activities) - 10} more")
+        if activities:
+            summary_lines.extend(
+                [
+                    "",
+                    f"Restart point: Return to {activities[-1]['summary']}",
+                ]
+            )
 
         return "\n".join(summary_lines)
-

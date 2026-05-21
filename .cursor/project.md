@@ -18,8 +18,8 @@
 - Prompt sources live in `ql/text.py`. Keep one canonical prompt per task.
 
 ## Prompts
-### Activity Historian (canonical)
-You are an activity historian. Analyze the attached screenshot and write a detailed account of what the user was doing at that moment, suitable for a work log.
+### Context Recovery Analyst (canonical)
+You are a context recovery analyst. Analyze the attached screenshot and write a detailed account that helps the user restart later without judging their focus or output.
 
 Return Markdown only (no preface, no extra commentary), using exactly these section headings:
 
@@ -42,19 +42,17 @@ Return Markdown only (no preface, no extra commentary), using exactly these sect
 ## Related project(s)
 - Short project/repo/doc names if strongly indicated; otherwise “Unknown”.
 
-## Time and scope estimate
-- Rough estimate of how long this kind of task block would take (e.g., “~10–20 minutes”), based only on what’s visible.
-
 ## Uncertainties
 - List any ambiguities and what additional signals would resolve them.
 
 ## Likely next actions
-- 3–5 bullets of what the user would logically do next.
+- 3–5 concrete, low-friction actions the user could take to resume.
 
 Rules:
 - Be concrete and rely only on what’s visible.
 - If unclear, state that explicitly under “Uncertainties.”
-- Keep the narrative precise and useful for future review.
+- Keep the narrative precise and useful for future restart notes.
+- Avoid productivity scoring, moral language, or labels like distracted/unproductive.
 
 ## Testing
 - Fixtures for screenshots live under `tests/fixtures/` (kept out of git LFS unless needed).
