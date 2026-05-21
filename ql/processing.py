@@ -19,6 +19,13 @@ import requests
 
 from ql import db as qldb
 from ql import system as qls
+from ql.enrichment import (
+    choose_window_title_from_ocr,
+    is_weak_window_title,
+    norm_text as _norm_text,
+    refine_summary_and_task,
+    refine_task_from_content,
+)
 from ql.project import resolve_project
 from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt, filter_ocr_cruft
 
@@ -114,19 +121,7 @@ def normalize_app(value: str) -> str:
 
 def is_weak_title(value: str, app: str = "") -> bool:
     """Return whether a window title is too generic to use as concrete context."""
-    norm = _norm_text(value)
-    app_norm = _norm_text(app)
-    if norm in PLACEHOLDER_TITLES:
-        return True
-    if app_norm and norm == app_norm:
-        if app_norm in {"cursor", "slack", "zoom workplace"}:
-            return False
-        return True
-    return norm in {
-        "google chrome",
-        "chrome - google chrome",
-        "visual studio code",
-    }
+    return is_weak_window_title(value, app)
 
 
 def normalize_window_title(value: str, app: str = "") -> str:
@@ -323,8 +318,9 @@ def guess_task(app: str, ocr_text: str) -> str:
         if any(keyword in ocr_text for keyword in coding_keywords):
             return "Coding"
     if app in ("Safari", "Google Chrome", "Arc", "Firefox", "Browser"):
-        if "workflow runs" in ocr_text or ("campaigns" in ocr_text and "accounts" in ocr_text):
-            return "Meeting"
+        override = refine_task_from_content(app, ocr_text)
+        if override:
+            return override
     return DEFAULT_TASK_BY_APP.get(app, "Unknown")
 
 
@@ -372,41 +368,17 @@ def summarize(
             coarse_task = vision_task
         vision_activity = vision_result.get("primary_activity", "")
         if vision_activity:
-            # Use vision activity as additional context
             logger.debug("Vision detected activity: %s", vision_activity)
 
-    summ = window_title if window_title and window_title != "Unknown" else (ocr_top[0] if ocr_top else "")
-    if app and summ and _norm_text(summ) == _norm_text(app):
-        for line in ocr_top:
-            if line and _norm_text(line) != _norm_text(app):
-                summ = line
-                break
-    ambient_summary = any(token in _norm_text(summ) for token in ("check in", "single image", "movies", "today", "now"))
-    if ambient_summary and coarse_task != "Unknown":
-        if app == "Slack":
-            summ = "Slack check-in conversation"
-        elif app == "Zoom Workplace":
-            summ = "Meeting in Zoom Workplace"
-        elif app == "Cursor":
-            summ = "Coding in Cursor"
-        elif app == "Safari":
-            summ = f"{window_title} in Safari" if window_title and window_title != "Unknown" else "Browsing in Safari"
-    if app == "Zoom Workplace" and _norm_text(summ) in {"workplace", "meeting"}:
-        summ = "Meeting in Zoom Workplace"
-    if app == "Cursor" and _norm_text(summ) in {"selection", "run", "terminal", "unknown"}:
-        summ = "Coding in Cursor"
-    if app == "Safari" and _norm_text(summ) in {"workflow runs", "campaigns", "issues"}:
-        summ = f"{summ} in Safari"
-    if app == "Safari" and "workflow runs" in ocr_text:
-        coarse_task = "Meeting"
-        if "linear" not in _norm_text(summ):
-            summ = f"Linear {summ}" if summ else "Linear workflow tracking in Safari"
-    if app == "Draw Things" and (
-        _norm_text(summ) in {"cruft", "draw", "image", "wwindow", "safari"}
-        or _norm_text(window_title) == "safari"
-    ):
-        summ = "Browsing in Safari with Draw Things frontmost"
-        coarse_task = "Research"
+    refined = refine_summary_and_task(
+        app,
+        window_title,
+        ocr_top,
+        coarse_task,
+        clues,
+    )
+    summ = refined.summary
+    coarse_task = refined.coarse_task
     summ = summ.strip() or (f"{coarse_task} in {app}" if coarse_task != "Unknown" else f"Using {app}")
 
     conf = 0.5
@@ -560,92 +532,6 @@ def infer_app_from_content(window_title: str, ocr_lines: List[str]) -> str:
         return "Safari"
 
     return "Unknown"
-
-
-def _generic_title_tokens(app_norm: str) -> set[str]:
-    """Return OCR tokens that are too generic to use as a window title."""
-    generic = {
-        "",
-        "unknown",
-        app_norm,
-        "file",
-        "edit",
-        "view",
-        "window",
-        "help",
-        "run",
-        "terminal",
-        "selection",
-        "zoom",
-        "slack",
-        "draw",
-        "image",
-    }
-    if app_norm != "zoom workplace":
-        generic.add("meeting")
-        generic.add("workplace")
-    if app_norm != "cursor":
-        generic.add("cursor")
-    if app_norm == "cursor":
-        generic.update({"selection", "run", "terminal"})
-    return generic
-
-
-def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
-    """Pick a more informative window-title candidate from OCR text."""
-    app_norm = _norm_text(app)
-    generic = _generic_title_tokens(app_norm)
-    ambient_penalties = (
-        "check in",
-        "single image",
-        "movies",
-        "mon",
-        "apr",
-        "today",
-        "now",
-    )
-    candidates = []
-    for line in ocr_lines:
-        norm = _norm_text(line)
-        if norm in generic:
-            continue
-        if len(norm) < 4:
-            continue
-        score = len(norm)
-        if " " in norm:
-            score += 4
-        if any(token in norm for token in ["issue", "workflow", "check in", "youtube", "campaign", "linear", "workplace"]):
-            score += 6
-        if any(token in norm for token in ambient_penalties):
-            score -= 16
-        if any(ch.isdigit() for ch in norm):
-            score -= 8
-        if app_norm == "slack" and "check in" in norm:
-            score += 12
-        if app_norm == "zoom workplace" and "meeting" in norm:
-            score += 18
-        if app_norm == "cursor" and norm in {"terminal", "run", "selection"}:
-            score += 18
-        if app_norm == "cursor" and "check in" in norm:
-            score -= 30
-        if app_norm == "cursor" and norm == "cursor":
-            score += 25
-        if app_norm == "draw things" and ("cruft" in norm or "draw" in norm):
-            score += 6
-        if app_norm == "safari" and any(token in norm for token in ["workflow", "campaign", "issue", "accounts"]):
-            score += 8
-        candidates.append((score, line))
-    if candidates:
-        candidates.sort(reverse=True)
-        best = candidates[0][1][:80]
-        if app_norm == "cursor" and any(token in _norm_text(best) for token in ambient_penalties):
-            return app if app and app != "Unknown" else best
-        if app_norm == "zoom workplace" and _norm_text(best) == "workplace":
-            return "Meeting"
-        if app_norm == "draw things" and _norm_text(best) == "cruft":
-            return "Safari"
-        return best
-    return app if app and app != "Unknown" else "Unknown"
 
 
 def _merge_vision_project_indicators(
