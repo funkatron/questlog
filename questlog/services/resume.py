@@ -16,6 +16,11 @@ from ql.processing import (
     normalize_window_title,
 )
 from ql.text import redact_for_display
+from ql.state_probes import (
+    format_probe_summary,
+    gather_state_probes,
+    resolve_allowed_roots,
+)
 
 
 OPEN_LOOP_TERMS = (
@@ -86,6 +91,7 @@ class ResumeService:
         artifacts = self._artifacts(rows)
         last_session = sessions[-1] if sessions else None
         last_session_open_loops = self._open_loops(last_session["items"]) if last_session else []
+        local_state = self._local_state(last_session, artifacts)
 
         return {
             "window_start": window_start.isoformat(timespec="seconds"),
@@ -99,6 +105,7 @@ class ResumeService:
             "open_loops": open_loops[:5],
             "next_action": self._next_action(last_session, last_session_open_loops, artifacts),
             "low_confidence": low_confidence[:5],
+            "local_state": local_state,
         }
 
     def render_text(self, resume: dict[str, Any]) -> str:
@@ -136,6 +143,12 @@ class ResumeService:
         lines.append("")
         lines.append("Low-confidence items:")
         lines.extend(self._bullet_lines(resume["low_confidence"], fallback="No low-confidence items found."))
+
+        if resume.get("local_state"):
+            lines.append("")
+            lines.append("Local state (read-only, may be stale):")
+            lines.extend(self._bullet_lines(resume["local_state"], fallback="No local state observed."))
+
         return "\n".join(lines)
 
     def _load_rows(
@@ -325,6 +338,39 @@ class ResumeService:
             summary = self._best_summary(session["items"])
             return f"Resume: {summary}"
         return "Capture or backfill recent screenshots, then run `questlog resume` again."
+
+    def _local_state(
+        self,
+        session: dict[str, Any] | None,
+        artifacts: list[str],
+    ) -> list[str]:
+        probe_cfg = getattr(self.config, "state_probes", None)
+        enabled = bool(getattr(probe_cfg, "enabled", False))
+        if not enabled or not session:
+            return []
+
+        session_artifacts: list[str] = []
+        session_clues: dict[str, Any] = {
+            "urls": [],
+            "domains": [],
+            "repo_tokens": [],
+            "tokens": [],
+        }
+        for row in session["items"]:
+            session_artifacts.extend(row.get("artifacts", []))
+            clues = row.get("clues") or {}
+            for key in session_clues:
+                session_clues[key].extend(clues.get(key, []))
+
+        probes = gather_state_probes(
+            session_artifacts or artifacts,
+            session_clues,
+            enabled=True,
+            allowed_roots=resolve_allowed_roots(getattr(probe_cfg, "allowed_roots", None)),
+            max_repos=int(getattr(probe_cfg, "max_repos", 2)),
+            timeout_seconds=float(getattr(probe_cfg, "timeout_seconds", 5.0)),
+        )
+        return [format_probe_summary(probe) for probe in probes]
 
     def _session_label(self, session: dict[str, Any]) -> str:
         project, app, task = session["key"]

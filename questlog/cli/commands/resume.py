@@ -23,9 +23,16 @@ def resume(
         "--json",
         help="Print structured resume data as JSON",
     ),
+    state_probes: bool | None = typer.Option(
+        None,
+        "--state-probes/--no-state-probes",
+        help="Override config for read-only local git state probes",
+    ),
 ) -> None:
     """Print a local, heuristic restart note for recent activity."""
     cfg = load_config()
+    if state_probes is not None:
+        cfg.state_probes.enabled = state_probes
     db_service = DatabaseService()
     resume_service = ResumeService(cfg)
 
