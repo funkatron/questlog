@@ -6,127 +6,48 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-
-BROWSER_APPS = frozenset(
-    {"Safari", "Google Chrome", "Arc", "Firefox", "Browser", "Chrome"}
-)
-CODING_APPS = frozenset(
-    {
-        "Cursor",
-        "Code",
-        "Visual Studio Code",
-        "Xcode",
-        "Terminal",
-        "iTerm2",
-        "PyCharm",
-        "WebStorm",
-        "GoLand",
-        "DataGrip",
-    }
-)
-MEETING_APPS = frozenset({"Zoom Workplace", "Zoom", "Calendar", "Google Meet", "Teams"})
-COMMS_APPS = frozenset({"Slack", "Discord", "Mail", "Spark"})
-NON_BROWSER_FRONTMOST_APPS = frozenset({"Draw Things", "Figma", "Photos", "Preview"})
-
-APP_WHERE_NAME_IS_VALID_TITLE = frozenset({"cursor", "slack", "zoom workplace"})
-
-AMBIENT_OCR_FRAGMENTS = (
-    "check in",
-    "single image",
-    "movies",
-    "mon",
-    "apr",
-    "may",
-    "jun",
-    "today",
-    "now",
-)
-
-MENU_BAR_TOKENS = frozenset(
-    {
-        "file",
-        "edit",
-        "view",
-        "window",
-        "help",
-        "run",
-        "terminal",
-        "selection",
-        "zoom",
-        "draw",
-        "image",
-        "history",
-        "bookmarks",
-        "go",
-        "format",
-        "tools",
-    }
-)
-
-DEV_UI_TOKENS = frozenset({"selection", "run", "terminal", "unknown"})
-
-MEETING_SIGNALS = (
-    "zoom",
-    "meeting",
-    "participants",
-    "workplace",
-)
-
-WORK_TRACKING_SIGNALS = (
-    "workflow runs",
-    "issues",
-    "campaigns",
-    "edit advertiser",
-    "linear",
-    "linear.app",
-    "jira",
-    "asana",
-    "backlog",
-)
-
-BROWSER_CONTENT_SIGNALS = (
-    "youtube",
-    "github.com",
-    "workflow runs",
-    "linear.app",
-    "icloud",
-    "safari",
-    "chrome",
-    "http://",
-    "https://",
-    "www.",
-    "tabs",
-)
-
-WORK_TRACKING_TOOL_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Linear", ("linear", "linear.app", "workflow runs")),
-    ("Jira", ("jira", "sprint board")),
-    ("Asana", ("asana",)),
-)
-
-TITLE_KEYWORD_BONUSES = (
-    "issue",
-    "workflow",
-    "youtube",
-    "campaign",
-    "linear",
-    "workplace",
-    "meeting",
-    "check in",
-)
-
-WEAK_BROWSER_TITLES = frozenset(
-    {
-        "google chrome",
-        "chrome - google chrome",
-        "visual studio code",
-    }
+from ql.vocabulary import (
+    AMBIENT_OCR_FRAGMENTS,
+    APP_INFERENCE_RULES,
+    APP_WHERE_NAME_IS_VALID_TITLE,
+    BROWSER_APPS,
+    BROWSER_CONTENT_SIGNALS,
+    BROWSER_WORK_UI_SIGNALS,
+    BrowserLabel,
+    ClueKey,
+    CODING_APPS,
+    CODING_TASK_KEYWORDS,
+    COMMS_APPS,
+    DEFAULT_TASK_BY_APP,
+    DevUiToken,
+    DomainSuffix,
+    GENERIC_MEETING_TITLE_TOKENS,
+    GENERIC_TITLE_SKIP_TOKENS,
+    MEETING_APPS,
+    MEETING_SIGNALS,
+    MenuToken,
+    NON_BROWSER_FRONTMOST_APPS,
+    OcrSignal,
+    PLACEHOLDER_TITLES,
+    Placeholder,
+    SAFARI_TITLE_KEYWORD_BONUSES,
+    SummaryPhrase,
+    Task,
+    TITLE_KEYWORD_BONUSES,
+    TitleScoreWeight,
+    WEAK_BROWSER_TITLES,
+    WORK_TRACKING_SIGNALS,
+    WORK_TRACKING_TOOLS,
+    WorkTrackingLabel,
+    AppSlug,
+    norm_text,
 )
 
 
-def norm_text(value: str) -> str:
-    """Normalize text for loose heuristic matching."""
-    return " ".join((value or "").strip().lower().split())
+@dataclass(frozen=True)
+class SummaryRefinement:
+    summary: str
+    coarse_task: str
 
 
 def is_ambient_ocr_fragment(text: str) -> bool:
@@ -139,7 +60,7 @@ def is_ambient_ocr_fragment(text: str) -> bool:
 
 def is_menu_bar_token(text: str) -> bool:
     """Return whether OCR text is likely a menu bar item."""
-    return norm_text(text) in MENU_BAR_TOKENS
+    return norm_text(text) in MenuToken.ALL
 
 
 def resembles_menu_bar_garble(text: str) -> bool:
@@ -148,8 +69,8 @@ def resembles_menu_bar_garble(text: str) -> bool:
     if not norm:
         return True
     return any(
-        len(token) >= 4 and (token in norm or norm in token)
-        for token in MENU_BAR_TOKENS
+        len(token) >= TitleScoreWeight.MIN_TITLE_LENGTH and (token in norm or norm in token)
+        for token in MenuToken.ALL
     )
 
 
@@ -168,9 +89,11 @@ def is_low_signal_title(text: str, app: str = "") -> bool:
     if resembles_menu_bar_garble(text):
         return True
     if app_norm in {norm_text(name) for name in NON_BROWSER_FRONTMOST_APPS}:
-        if len(norm) < 12 and not any(keyword in norm for keyword in TITLE_KEYWORD_BONUSES):
+        if len(norm) < TitleScoreWeight.SHORT_NON_BROWSER_TITLE_MAX and not any(
+            keyword in norm for keyword in TITLE_KEYWORD_BONUSES
+        ):
             return True
-    if len(norm) < 4:
+    if len(norm) < TitleScoreWeight.MIN_TITLE_LENGTH:
         return True
     return False
 
@@ -181,7 +104,10 @@ def detect_browser_content(ocr_text: str, clues: dict[str, Any] | None = None) -
     haystack = ocr_text.lower()
     if any(signal in haystack for signal in BROWSER_CONTENT_SIGNALS):
         return True
-    return any("http" in str(url).lower() for url in clues.get("urls", []))
+    return any(
+        OcrSignal.HTTP in str(url).lower() or OcrSignal.HTTPS in str(url).lower()
+        for url in clues.get(ClueKey.URLS, [])
+    )
 
 
 def detect_meeting_context(ocr_text: str) -> bool:
@@ -203,26 +129,29 @@ def suggests_multitasking_during_call(ocr_text: str) -> bool:
     has_meeting = detect_meeting_context(haystack)
     if has_work and has_meeting:
         return True
-    # Admin/campaign UI plus work-tracking often appears during screen-share calls.
-    return has_work and "campaigns" in haystack and "accounts" in haystack
+    return (
+        has_work
+        and OcrSignal.CAMPAIGNS in haystack
+        and OcrSignal.ACCOUNTS in haystack
+    )
 
 
 def infer_work_tracking_label(ocr_text: str) -> str | None:
     """Infer a work-tracking tool label from OCR when evidence exists."""
     haystack = ocr_text.lower()
-    for label, patterns in WORK_TRACKING_TOOL_HINTS:
-        if any(pattern in haystack for pattern in patterns):
-            return label
+    for tool in WORK_TRACKING_TOOLS:
+        if any(pattern in haystack for pattern in tool.patterns):
+            return tool.label
     if detect_work_tracking_context(haystack):
-        return "work tracking"
+        return WorkTrackingLabel.GENERIC
     return None
 
 
 def default_browser_label() -> str:
     """Return a platform-default browser label when OCR lacks explicit browser text."""
     if sys.platform == "darwin":
-        return "Safari"
-    return "browser"
+        return BrowserLabel.SAFARI
+    return BrowserLabel.GENERIC
 
 
 def ocr_is_mostly_low_signal(ocr_lines: list[str], app: str) -> bool:
@@ -241,15 +170,18 @@ def infer_browser_label(ocr_text: str, clues: dict[str, Any] | None = None) -> s
     """Infer a browser label from OCR/clues when browser content is visible."""
     clues = clues or {}
     haystack = ocr_text.lower()
-    if "safari" in haystack or "icloud" in haystack:
-        return "Safari"
-    if "chrome" in haystack or "google chrome" in haystack:
-        return "Chrome"
-    domains = [str(domain).lower() for domain in clues.get("domains", [])]
-    if any(domain.endswith(("youtube.com", "github.com", "linear.app")) for domain in domains):
-        return "Safari"
+    if OcrSignal.SAFARI in haystack or OcrSignal.ICLOUD in haystack:
+        return BrowserLabel.SAFARI
+    if OcrSignal.CHROME in haystack or OcrSignal.GOOGLE_CHROME in haystack:
+        return BrowserLabel.CHROME
+    domains = [str(domain).lower() for domain in clues.get(ClueKey.DOMAINS, [])]
+    if any(
+        domain.endswith((DomainSuffix.YOUTUBE, DomainSuffix.GITHUB, DomainSuffix.LINEAR))
+        for domain in domains
+    ):
+        return BrowserLabel.SAFARI
     if detect_browser_content(haystack, clues):
-        return "browser"
+        return BrowserLabel.GENERIC
     return None
 
 
@@ -276,14 +208,15 @@ def has_dual_context(
 def generic_title_skip_tokens(app: str) -> set[str]:
     """Return OCR tokens that are too generic to use as a window title for this app."""
     app_norm = norm_text(app)
-    generic = set(MENU_BAR_TOKENS)
-    generic.update({"", "unknown", app_norm, "meeting", "workplace", "cursor", "slack", "zoom"})
-    if app_norm == "zoom workplace":
-        generic.discard("meeting")
-        generic.discard("workplace")
-    if app_norm == "cursor":
-        generic.discard("cursor")
-        generic.update(DEV_UI_TOKENS)
+    generic = set(MenuToken.ALL)
+    generic.update(GENERIC_TITLE_SKIP_TOKENS)
+    generic.add(app_norm)
+    if app_norm == AppSlug.ZOOM_WORKPLACE:
+        generic.discard(OcrSignal.MEETING)
+        generic.discard(OcrSignal.WORKPLACE)
+    if app_norm == AppSlug.CURSOR:
+        generic.discard(AppSlug.CURSOR)
+        generic.update(DevUiToken.ALL)
     return generic
 
 
@@ -293,32 +226,32 @@ def score_window_title_candidate(line: str, app: str, ocr_lines: list[str]) -> f
     norm = norm_text(line)
     if norm in generic_title_skip_tokens(app):
         return float("-inf")
-    if len(norm) < 4:
+    if len(norm) < TitleScoreWeight.MIN_TITLE_LENGTH:
         return float("-inf")
 
     score = float(len(norm))
     if " " in norm:
-        score += 4.0
+        score += TitleScoreWeight.MULTI_WORD_BONUS
     if any(keyword in norm for keyword in TITLE_KEYWORD_BONUSES):
-        score += 6.0
+        score += TitleScoreWeight.KEYWORD_BONUS
     if is_ambient_ocr_fragment(norm):
-        score -= 16.0
+        score -= TitleScoreWeight.AMBIENT_PENALTY
     if any(ch.isdigit() for ch in norm):
-        score -= 8.0
+        score -= TitleScoreWeight.DIGIT_PENALTY
 
-    if app_norm == "slack" and "check in" in norm:
-        score += 12.0
-    if app_norm == "zoom workplace" and "meeting" in norm:
-        score += 18.0
-    if app_norm == "cursor":
-        if norm in DEV_UI_TOKENS:
-            score += 18.0
-        if "check in" in norm:
-            score -= 30.0
-        if norm == "cursor":
-            score += 25.0
-    if app_norm == "safari" and any(token in norm for token in ("workflow", "campaign", "issue", "accounts")):
-        score += 8.0
+    if app_norm == AppSlug.SLACK and OcrSignal.CHECK_IN in norm:
+        score += TitleScoreWeight.SLACK_CHECK_IN_BONUS
+    if app_norm == AppSlug.ZOOM_WORKPLACE and OcrSignal.MEETING in norm:
+        score += TitleScoreWeight.ZOOM_MEETING_BONUS
+    if app_norm == AppSlug.CURSOR:
+        if norm in DevUiToken.ALL:
+            score += TitleScoreWeight.CURSOR_DEV_UI_BONUS
+        if OcrSignal.CHECK_IN in norm:
+            score -= TitleScoreWeight.CURSOR_CHECK_IN_PENALTY
+        if norm == AppSlug.CURSOR:
+            score += TitleScoreWeight.CURSOR_APP_NAME_BONUS
+    if app_norm == AppSlug.SAFARI and any(token in norm for token in SAFARI_TITLE_KEYWORD_BONUSES):
+        score += TitleScoreWeight.SAFARI_WORK_UI_BONUS
     return score
 
 
@@ -332,16 +265,16 @@ def choose_window_title_from_ocr(app: str, ocr_lines: list[str]) -> str:
             candidates.append((score, line))
 
     if not candidates:
-        return app if app and app != "Unknown" else "Unknown"
+        return app if app and app != Placeholder.UNKNOWN else Placeholder.UNKNOWN
 
     candidates.sort(reverse=True)
     best = candidates[0][1][:80]
     best_norm = norm_text(best)
 
-    if app_norm == "cursor" and is_ambient_ocr_fragment(best):
-        return app if app and app != "Unknown" else best
-    if app_norm == "zoom workplace" and best_norm == "workplace":
-        return "Meeting"
+    if app_norm == AppSlug.CURSOR and is_ambient_ocr_fragment(best):
+        return app if app and app != Placeholder.UNKNOWN else best
+    if app_norm == AppSlug.ZOOM_WORKPLACE and best_norm == OcrSignal.WORKPLACE:
+        return Task.MEETING
     if app in NON_BROWSER_FRONTMOST_APPS and is_low_signal_title(best, app):
         return infer_browser_label(" ".join(ocr_lines).lower()) or default_browser_label()
     return best
@@ -351,7 +284,7 @@ def is_weak_window_title(value: str, app: str = "") -> bool:
     """Return whether a window title is too generic to store as concrete context."""
     norm = norm_text(value)
     app_norm = norm_text(app)
-    if norm in {"", "unknown", "main window", "main window title", "window", "window title"}:
+    if norm in PLACEHOLDER_TITLES:
         return True
     if app_norm and norm == app_norm and app_norm not in APP_WHERE_NAME_IS_VALID_TITLE:
         return True
@@ -362,20 +295,14 @@ def refine_task_from_content(app: str, ocr_text: str) -> str | None:
     """Return a task override when OCR content strongly suggests a different task."""
     haystack = ocr_text.lower()
     if app in BROWSER_APPS and suggests_multitasking_during_call(haystack):
-        return "Meeting"
-    if app in CODING_APPS and any(token in haystack for token in ("pytest", ".py", "terminal", "git ")):
-        return "Coding"
-    if app in COMMS_APPS and "check in" in haystack:
-        return "Comms"
+        return Task.MEETING
+    if app in CODING_APPS and any(token in haystack for token in CODING_TASK_KEYWORDS):
+        return Task.CODING
+    if app in COMMS_APPS and OcrSignal.CHECK_IN in haystack:
+        return Task.COMMS
     if app in MEETING_APPS:
-        return "Meeting"
+        return Task.MEETING
     return None
-
-
-@dataclass(frozen=True)
-class SummaryRefinement:
-    summary: str
-    coarse_task: str
 
 
 def fallback_summary_for_app(
@@ -386,21 +313,21 @@ def fallback_summary_for_app(
 ) -> str:
     """Build a neutral summary when OCR only captured ambient chrome."""
     haystack = ocr_text.lower()
-    if app in COMMS_APPS and "check in" in haystack:
-        return f"{app} check-in conversation"
+    if app in COMMS_APPS and OcrSignal.CHECK_IN in haystack:
+        return SummaryPhrase.check_in_conversation(app)
     if app in COMMS_APPS:
-        return f"{app} conversation"
+        return SummaryPhrase.conversation(app)
     if app in MEETING_APPS:
-        return f"Meeting in {app}"
+        return SummaryPhrase.meeting_in_app(app)
     if app in CODING_APPS:
-        return f"Coding in {app}"
+        return SummaryPhrase.coding_in_app(app)
     if app in BROWSER_APPS:
-        if window_title and window_title != "Unknown":
-            return f"{window_title} in {app}"
-        return f"Browsing in {app}"
-    if coarse_task != "Unknown":
-        return f"{coarse_task} in {app}"
-    return f"Using {app}"
+        if window_title and window_title != Placeholder.UNKNOWN:
+            return SummaryPhrase.title_in_app(window_title, app)
+        return SummaryPhrase.browsing_in_app(app)
+    if coarse_task != Task.UNKNOWN:
+        return SummaryPhrase.task_in_app(coarse_task, app)
+    return SummaryPhrase.using_app(app)
 
 
 def refine_summary_and_task(
@@ -414,7 +341,7 @@ def refine_summary_and_task(
     clues = clues or {}
     ocr_text = " ".join(ocr_lines).lower()
     summary = (window_title or "").strip()
-    if not summary or summary == "Unknown":
+    if not summary or summary == Placeholder.UNKNOWN:
         summary = ocr_lines[0].strip() if ocr_lines else ""
 
     if app and summary and norm_text(summary) == norm_text(app):
@@ -431,27 +358,73 @@ def refine_summary_and_task(
     if is_ambient_ocr_fragment(summary) or is_low_signal_title(summary, app):
         summary = fallback_summary_for_app(app, window_title, task, ocr_text)
 
-    if app in MEETING_APPS and norm_text(summary) in {"workplace", "meeting"}:
-        summary = f"Meeting in {app}"
+    if app in MEETING_APPS and norm_text(summary) in GENERIC_MEETING_TITLE_TOKENS:
+        summary = SummaryPhrase.meeting_in_app(app)
 
-    if app in CODING_APPS and norm_text(summary) in DEV_UI_TOKENS:
-        summary = f"Coding in {app}"
+    if app in CODING_APPS and norm_text(summary) in DevUiToken.ALL:
+        summary = SummaryPhrase.coding_in_app(app)
 
     if has_dual_context(app, ocr_text, clues, ocr_lines):
         browser = infer_browser_label(ocr_text, clues) or default_browser_label()
-        summary = f"Browsing in {browser} with {app} frontmost"
-        if task in {"Unknown", "Design"}:
-            task = "Research"
+        summary = SummaryPhrase.browsing_with_frontmost(browser, app)
+        if task in {Task.UNKNOWN, Task.DESIGN}:
+            task = Task.RESEARCH
 
     if detect_work_tracking_context(ocr_text):
         label = infer_work_tracking_label(ocr_text)
         if suggests_multitasking_during_call(ocr_text):
-            task = "Meeting"
-        base = window_title if window_title not in {"", "Unknown"} else summary
+            task = Task.MEETING
+        base = window_title if window_title not in {Placeholder.EMPTY, Placeholder.UNKNOWN} else summary
         if label and norm_text(label) not in norm_text(base):
-            summary = f"{label} {base}".strip()
+            summary = SummaryPhrase.labeled_work_item(label, base)
         if app in BROWSER_APPS and " in " not in norm_text(summary):
-            summary = f"{summary} in {app}".strip()
+            summary = SummaryPhrase.title_in_app(summary, app)
 
     summary = summary.strip() or fallback_summary_for_app(app, window_title, task, ocr_text)
     return SummaryRefinement(summary=summary[:160], coarse_task=task)
+
+
+def infer_app_from_content(window_title: str, ocr_lines: list[str]) -> str:
+    """Infer application name from window title and OCR content."""
+    combined_text = " ".join([window_title] + ocr_lines).lower()
+
+    draw_rule = next(rule for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.DRAW_THINGS)
+    if any(keyword in combined_text for keyword in draw_rule.keywords) or (
+        MenuToken.DRAW in combined_text
+        and MenuToken.IMAGE in combined_text
+        and MenuToken.WINDOW in combined_text
+    ):
+        return draw_rule.app
+
+    if OcrSignal.ZOOM in combined_text and (
+        OcrSignal.WORKPLACE in combined_text or OcrSignal.MEETING in combined_text
+    ):
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.ZOOM_WORKPLACE)
+
+    for rule in APP_INFERENCE_RULES:
+        if rule.slug == AppSlug.DRAW_THINGS:
+            continue
+        if any(keyword in combined_text for keyword in rule.keywords):
+            return rule.app
+
+    title_lower = window_title.lower()
+    if any(ext in title_lower for ext in (".py", ".js", ".ts", ".md")):
+        if AppSlug.CURSOR in title_lower or OcrSignal.GITHUB_COM in combined_text:
+            return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.CURSOR)
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.CODE)
+
+    if OcrSignal.TERMINAL in title_lower or "iterm" in title_lower:
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.TERMINAL)
+
+    if OcrSignal.GITHUB_COM in combined_text or OcrSignal.REPOSITORY in combined_text:
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.GITHUB)
+
+    if OcrSignal.README in combined_text and (
+        "github" in combined_text or ".md" in combined_text
+    ):
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.CURSOR)
+
+    if any(token in combined_text for token in BROWSER_WORK_UI_SIGNALS):
+        return next(rule.app for rule in APP_INFERENCE_RULES if rule.slug == AppSlug.SAFARI)
+
+    return Placeholder.UNKNOWN

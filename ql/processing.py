@@ -21,30 +21,30 @@ from ql import db as qldb
 from ql import system as qls
 from ql.enrichment import (
     choose_window_title_from_ocr,
+    infer_app_from_content,
     is_weak_window_title,
-    norm_text as _norm_text,
     refine_summary_and_task,
     refine_task_from_content,
 )
 from ql.project import resolve_project
 from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt, filter_ocr_cruft
+from ql.vocabulary import (
+    BROWSER_APPS,
+    DEFAULT_TASK_BY_APP,
+    PLACEHOLDER_TITLES,
+    Placeholder,
+    ClueKey,
+    Task,
+    TERMINAL_TASK_KEYWORDS,
+    SummaryPhrase,
+    App,
+    norm_text as _norm_text,
+)
 
 
 logger = logging.getLogger("questlog")
 
-ALLOWED_TASKS = {
-    "Coding",
-    "Research",
-    "Comms",
-    "Build",
-    "Test",
-    "Design",
-    "Meeting",
-    "Admin",
-    "Idle",
-    "Notes",
-    "Unknown",
-}
+ALLOWED_TASKS = Task.ALL
 
 PLACEHOLDER_APPS = {
     "",
@@ -54,14 +54,7 @@ PLACEHOLDER_APPS = {
     "application",
 }
 
-PLACEHOLDER_TITLES = {
-    "",
-    "unknown",
-    "main window",
-    "main window title",
-    "window",
-    "window title",
-}
+PLACEHOLDER_TITLES = set(PLACEHOLDER_TITLES)  # mutable copy for legacy checks
 
 GENERIC_SUMMARY_BITS = (
     "appears to be",
@@ -102,11 +95,6 @@ CONCRETE_OPEN_LOOP_TERMS = (
 )
 
 
-def _norm_text(value: str) -> str:
-    """Normalize text for loose heuristic matching."""
-    return " ".join((value or "").strip().lower().split())
-
-
 def is_placeholder_app(value: str) -> bool:
     """Return whether an app value is a model placeholder rather than evidence."""
     norm = _norm_text(value)
@@ -116,7 +104,7 @@ def is_placeholder_app(value: str) -> bool:
 def normalize_app(value: str) -> str:
     """Normalize app names while preserving real unknown app names."""
     value = (value or "").strip()
-    return "Unknown" if is_placeholder_app(value) else value
+    return Placeholder.UNKNOWN if is_placeholder_app(value) else value
 
 
 def is_weak_title(value: str, app: str = "") -> bool:
@@ -127,7 +115,7 @@ def is_weak_title(value: str, app: str = "") -> bool:
 def normalize_window_title(value: str, app: str = "") -> str:
     """Normalize weak or placeholder window titles to Unknown."""
     value = (value or "").strip()
-    return "Unknown" if is_weak_title(value, app) else value
+    return Placeholder.UNKNOWN if is_weak_title(value, app) else value
 
 
 def clean_summary(value: str) -> str:
@@ -155,7 +143,7 @@ def clean_summary(value: str) -> str:
         summary = summary.replace(old, new)
 
     summary = summary.strip(" -.")
-    return summary or "Recent activity captured"
+    return summary or Placeholder.RECENT_ACTIVITY
 
 
 def is_generic_summary(value: str) -> bool:
@@ -163,7 +151,7 @@ def is_generic_summary(value: str) -> bool:
     norm = _norm_text(value)
     if not norm:
         return True
-    if norm in {"unknown", "recent activity captured", "using unknown"}:
+    if norm in {Placeholder.UNKNOWN.lower(), Placeholder.RECENT_ACTIVITY.lower(), Placeholder.USING_UNKNOWN}:
         return True
     return any(bit in norm for bit in GENERIC_SUMMARY_BITS)
 
@@ -174,7 +162,7 @@ def validate_task(raw_task: str, app: str, ocr_text: str) -> str:
     if task in ALLOWED_TASKS:
         return task
     inferred = guess_task(app, ocr_text.lower())
-    return inferred if inferred != "Unknown" else "Unknown"
+    return inferred if inferred != Task.UNKNOWN else Task.UNKNOWN
 
 
 def has_concrete_evidence(
@@ -192,12 +180,12 @@ def has_concrete_evidence(
         return True
     if project:
         return True
-    if clues.get("urls") or clues.get("domains") or clues.get("repo_tokens"):
+    if clues.get(ClueKey.URLS) or clues.get(ClueKey.DOMAINS) or clues.get(ClueKey.REPO_TOKENS):
         return True
     text = f" {summary} {window_title} ".lower()
     if any(term in text for term in CONCRETE_OPEN_LOOP_TERMS):
         return True
-    if app != "Unknown" and task != "Unknown" and not is_weak_title(window_title, app):
+    if app != Placeholder.UNKNOWN and task != Task.UNKNOWN and not is_weak_title(window_title, app):
         return True
     return False
 
@@ -216,11 +204,11 @@ def calibrate_confidence(
 ) -> float:
     """Compute confidence from concrete signals instead of trusting model output."""
     score = 0.20
-    if app != "Unknown":
+    if app != Placeholder.UNKNOWN:
         score += 0.15
     if not is_weak_title(window_title, app):
         score += 0.15
-    if task != "Unknown":
+    if task != Task.UNKNOWN:
         score += 0.15
     if project:
         score += 0.10 if project_confidence >= 0.85 else 0.06
@@ -244,11 +232,11 @@ def calibrate_confidence(
         score += 0.06
 
     caps = [0.95]
-    if app == "Unknown":
+    if app == Placeholder.UNKNOWN:
         caps.append(0.70)
     if is_weak_title(window_title, app):
         caps.append(0.72)
-    if task == "Unknown":
+    if task == Task.UNKNOWN:
         caps.append(0.68)
     if project is None:
         caps.append(0.85)
@@ -261,35 +249,7 @@ def calibrate_confidence(
     return float(f"{max(0.0, min(confidence, 0.95)):.2f}")
 
 
-# Default task classification by application name
-DEFAULT_TASK_BY_APP = {
-    "Cursor": "Coding",
-    "Code": "Coding",
-    "Visual Studio Code": "Coding",
-    "Xcode": "Coding",
-    "Terminal": "Coding",
-    "iTerm2": "Coding",
-    "PyCharm": "Coding",
-    "WebStorm": "Coding",
-    "GoLand": "Coding",
-    "DataGrip": "Coding",
-    "Safari": "Research",
-    "Google Chrome": "Research",
-    "Arc": "Research",
-    "Firefox": "Research",
-    "Slack": "Comms",
-    "Discord": "Comms",
-    "Mail": "Comms",
-    "Spark": "Comms",
-    "Obsidian": "Notes",
-    "Notes": "Notes",
-    "Figma": "Design",
-    "Draw Things": "Design",
-    "Zoom Workplace": "Meeting",
-    "Calendar": "Meeting",
-    "Safari": "Research",
-    "Browser": "Research",
-}
+# Default task classification uses ql.vocabulary.DEFAULT_TASK_BY_APP
 
 
 def guess_task(app: str, ocr_text: str) -> str:
@@ -304,24 +264,17 @@ def guess_task(app: str, ocr_text: str) -> str:
 
     Returns:
         Task category string: "Coding", "Test", "Build", "Research", "Comms",
-        "Notes", "Design", "Meeting", "Admin", "Idle", or "Unknown".
+        "Notes", "Design", "Meeting", "Admin", "Idle", or Unknown.
     """
-    if app in ("Terminal", "iTerm2"):
-        test_keywords = ("pytest", "coverage", "unittest", "rspec")
-        build_keywords = ("docker", "compose", "kubectl", "terraform", "ansible")
-        coding_keywords = ("git ", "vim ", "nvim ", "code ", "gcc", "make ", "pip ", "uv ")
-
-        if any(keyword in ocr_text for keyword in test_keywords):
-            return "Test"
-        if any(keyword in ocr_text for keyword in build_keywords):
-            return "Build"
-        if any(keyword in ocr_text for keyword in coding_keywords):
-            return "Coding"
-    if app in ("Safari", "Google Chrome", "Arc", "Firefox", "Browser"):
+    if app in (App.TERMINAL, App.ITERM):
+        for task_label, keywords in TERMINAL_TASK_KEYWORDS.items():
+            if any(keyword in ocr_text for keyword in keywords):
+                return task_label
+    if app in BROWSER_APPS:
         override = refine_task_from_content(app, ocr_text)
         if override:
             return override
-    return DEFAULT_TASK_BY_APP.get(app, "Unknown")
+    return DEFAULT_TASK_BY_APP.get(app, Task.UNKNOWN)
 
 
 def summarize(
@@ -364,7 +317,7 @@ def summarize(
     # Enhance with vision context if available
     if vision_result:
         vision_task = vision_result.get("coarse_task", "")
-        if vision_task and vision_task != "Unknown":
+        if vision_task and vision_task != Task.UNKNOWN:
             coarse_task = vision_task
         vision_activity = vision_result.get("primary_activity", "")
         if vision_activity:
@@ -379,12 +332,16 @@ def summarize(
     )
     summ = refined.summary
     coarse_task = refined.coarse_task
-    summ = summ.strip() or (f"{coarse_task} in {app}" if coarse_task != "Unknown" else f"Using {app}")
+    summ = summ.strip() or (
+        SummaryPhrase.task_in_app(coarse_task, app)
+        if coarse_task != Task.UNKNOWN
+        else SummaryPhrase.using_app(app)
+    )
 
     conf = 0.5
     if project_guess[0]:
         conf += 0.15
-    if coarse_task != "Unknown":
+    if coarse_task != Task.UNKNOWN:
         conf += 0.15
     if clues.get("urls"):
         conf += 0.05
@@ -466,84 +423,16 @@ def summarize(
     return summ[:160], coarse_task, float(f"{conf:.2f}")
 
 
-def infer_app_from_content(window_title: str, ocr_lines: List[str]) -> str:
-    """Infer application name from window title and OCR content.
-
-    Uses heuristics to guess the application based on window title patterns
-    and OCR text content (menu bars, UI elements, etc.).
-
-    Args:
-        window_title: Window title text.
-        ocr_lines: OCR-extracted text lines.
-
-    Returns:
-        Inferred application name, or "Unknown" if no match.
-    """
-    combined_text = " ".join([window_title] + ocr_lines).lower()
-
-    # Check for app indicators in OCR (menu bars, UI elements)
-    app_indicators = {
-        "safari": ["safari", "file edit view history bookmarks"],
-        "chrome": ["chrome", "google chrome"],
-        "firefox": ["firefox", "mozilla"],
-        "cursor": ["cursor", "cursor editor"],
-        "code": ["visual studio code", "code", "vscode"],
-        "zoom workplace": ["zoom workplace", "zoom", "meeting"],
-        "terminal": ["terminal", "iterm", "zsh", "bash"],
-        "slack": ["slack"],
-        "discord": ["discord"],
-        "mail": ["mail", "apple mail"],
-        "notes": ["notes"],
-        "figma": ["figma"],
-        "obsidian": ["obsidian"],
-        "draw things": ["drawthings", "draw things", "edit image view window help", "version history", "local network"],
-        "github": ["github.com", "github", "repository", "pull request", "issue"],
-    }
-
-    # Check for Draw Things first (has distinctive UI elements)
-    if any(indicator in combined_text for indicator in app_indicators["draw things"]) or (
-        "draw" in combined_text and "image" in combined_text and "window" in combined_text
-    ):
-        return "Draw Things"
-
-    if "zoom" in combined_text and ("workplace" in combined_text or "meeting" in combined_text):
-        return "Zoom Workplace"
-
-    # Check other apps
-    for app_name, keywords in app_indicators.items():
-        if app_name == "draw things":
-            continue  # Already checked
-        if any(keyword in combined_text for keyword in keywords):
-            return app_name.title()
-
-    # Check window title for common patterns
-    title_lower = window_title.lower()
-    if ".py" in title_lower or ".js" in title_lower or ".ts" in title_lower or ".md" in title_lower:
-        if "cursor" in title_lower or "github.com" in combined_text:
-            return "Cursor"
-        return "Code"
-    if "terminal" in title_lower or "iterm" in title_lower:
-        return "Terminal"
-    if "github.com" in combined_text or "repository" in combined_text:
-        return "GitHub"
-    if "readme" in combined_text and ("github" in combined_text or ".md" in combined_text):
-        return "Cursor"  # Likely viewing README in Cursor/VS Code
-    if any(token in combined_text for token in ["linear.app", "workflow runs", "accounts", "campaigns", "edit advertiser", "issues"]):
-        return "Safari"
-
-    return "Unknown"
-
-
 def _merge_vision_project_indicators(
     clues: Dict[str, Any],
     vision_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Merge project indicators discovered by vision into OCR-derived clues."""
     merged = {
-        "urls": list(clues.get("urls", [])),
-        "domains": list(clues.get("domains", [])),
-        "repo_tokens": list(clues.get("repo_tokens", [])),
-        "tokens": list(clues.get("tokens", [])),
+        ClueKey.URLS: list(clues.get(ClueKey.URLS, [])),
+        ClueKey.DOMAINS: list(clues.get(ClueKey.DOMAINS, [])),
+        ClueKey.REPO_TOKENS: list(clues.get(ClueKey.REPO_TOKENS, [])),
+        ClueKey.TOKENS: list(clues.get(ClueKey.TOKENS, [])),
     }
     for proj_indicator in vision_result.get("project_indicators", []):
         if isinstance(proj_indicator, dict):
@@ -589,7 +478,7 @@ def _needs_vision_fallback(
     }
     if confidence < confidence_floor:
         return True
-    if app == "Unknown" or window_title == "Unknown" or coarse_task == "Unknown":
+    if app == Placeholder.UNKNOWN or window_title == Placeholder.UNKNOWN or coarse_task == Placeholder.UNKNOWN:
         return True
     if len(ocr_lines) < 3:
         return True
@@ -635,15 +524,15 @@ def process_image(
     # App and window title detection
     if use_app_detection:
         meta = qls.front_app_info()
-        app = meta.get("app", "Unknown")
-        window_title = meta.get("window_title", "Unknown")
+        app = meta.get("app", Placeholder.UNKNOWN)
+        window_title = meta.get("window_title", Placeholder.UNKNOWN)
         blocklist = cfg.get("blocklist_apps") or []
         if app in blocklist:
             logger.info("skipping blocklisted app: %s", app)
             return None
     else:
-        app = "Unknown"
-        window_title = "Unknown"
+        app = Placeholder.UNKNOWN
+        window_title = Placeholder.UNKNOWN
 
     # SUPPLEMENTAL: OCR for additional text context
     # Try EasyOCR first (best quality), then LLM OCR, then Tesseract
@@ -663,16 +552,16 @@ def process_image(
 
     redacted = [redact(line) for line in ocr_filtered]
 
-    if window_title == "Unknown" and redacted:
+    if window_title == Placeholder.UNKNOWN and redacted:
         title_app = app
-        if title_app == "Unknown" and not use_app_detection:
+        if title_app == Placeholder.UNKNOWN and not use_app_detection:
             title_app = infer_app_from_content(window_title, redacted)
         # Fallback: Improve window title from OCR if still Unknown
         window_title = choose_window_title_from_ocr(title_app, redacted)
         logger.debug("Using OCR fallback for window title: %s", window_title[:40])
 
-    # Clean up window title if it looks like system stats (even if not "Unknown")
-    if window_title and window_title != "Unknown":
+    # Clean up window title if it looks like system stats (even when not unknown)
+    if window_title and window_title != Placeholder.UNKNOWN:
         if re.search(r'\b(gpu|cpu|mem|ram|fs|loa|pu)\b', window_title, re.IGNORECASE) and len(re.findall(r'\d', window_title)) > 2:
             # Try to find a better window title from filtered OCR
             for line in redacted[:10]:
@@ -693,7 +582,7 @@ def process_image(
                         break
 
     # Infer app from content if we didn't detect it
-    if app == "Unknown" and not use_app_detection:
+    if app == Placeholder.UNKNOWN and not use_app_detection:
         app = infer_app_from_content(window_title, redacted)
 
     clues = extract_clues(app, window_title, redacted)
@@ -728,17 +617,17 @@ def process_image(
         vision_result = qls.analyze_image_with_vision(cfg, file_path)
         vision_available = bool(vision_result)
         if vision_available:
-            logger.debug("Vision analysis successful: %s", vision_result.get("primary_app", "Unknown"))
+            logger.debug("Vision analysis successful: %s", vision_result.get("primary_app", Placeholder.UNKNOWN))
         else:
             logger.debug("Vision analysis unavailable, using OCR-based flow")
     else:
         logger.debug("Skipping vision analysis; OCR-based result was sufficient")
 
     if vision_available:
-        if vision_result.get("primary_window_title") != "Unknown":
+        if vision_result.get("primary_window_title") != Placeholder.UNKNOWN:
             window_title = vision_result.get("primary_window_title", window_title)
             logger.debug("Using vision-provided window title: %s", window_title[:40])
-        if not use_app_detection and vision_result.get("primary_app") != "Unknown":
+        if not use_app_detection and vision_result.get("primary_app") != Placeholder.UNKNOWN:
             app = vision_result.get("primary_app", app)
             if vision_result.get("apps_visible"):
                 logger.debug("Vision detected apps: %s", vision_result.get("apps_visible"))
@@ -796,7 +685,7 @@ def process_image(
     )
 
     # Diagnostic logging for Unknown entries
-    if app == "Unknown" or window_title == "Unknown" or coarse_task == "Unknown":
+    if app == Placeholder.UNKNOWN or window_title == Placeholder.UNKNOWN or coarse_task == Placeholder.UNKNOWN:
         logger.warning(
             "Low-quality entry detected: app=%s, title=%s, task=%s, ocr_lines=%d, confidence=%.2f",
             app, window_title, coarse_task, len(redacted), confidence
