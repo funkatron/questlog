@@ -3,6 +3,8 @@
 Selected from `/Volumes/T7-1TB/TimeSnapper-imgs/2026-04-27` to keep OCR and
 backfill experiments fast and repeatable.
 
+Fixture JPGs are stored in Git LFS. After clone, run `git lfs pull` if images are missing locally.
+
 Use [targets.json](/Users/coj/src/questlog/tests/fixtures/screenshots/targets.json)
 as the evaluation baseline. It distinguishes between the likely frontmost app
 and the visible activity on screen, because those are not always the same.

@@ -19,6 +19,7 @@ import requests
 
 from ql import db as qldb
 from ql import system as qls
+from ql.project import resolve_project
 from ql.text import redact, find_artifacts, extract_clues, build_ollama_prompt, filter_ocr_cruft
 
 
@@ -118,12 +119,12 @@ def is_weak_title(value: str, app: str = "") -> bool:
     if norm in PLACEHOLDER_TITLES:
         return True
     if app_norm and norm == app_norm:
+        if app_norm in {"cursor", "slack", "zoom workplace"}:
+            return False
         return True
     return norm in {
         "google chrome",
         "chrome - google chrome",
-        "safari",
-        "cursor",
         "visual studio code",
     }
 
@@ -321,90 +322,10 @@ def guess_task(app: str, ocr_text: str) -> str:
             return "Build"
         if any(keyword in ocr_text for keyword in coding_keywords):
             return "Coding"
+    if app in ("Safari", "Google Chrome", "Arc", "Firefox", "Browser"):
+        if "workflow runs" in ocr_text or ("campaigns" in ocr_text and "accounts" in ocr_text):
+            return "Meeting"
     return DEFAULT_TASK_BY_APP.get(app, "Unknown")
-
-
-def resolve_project(
-    projects: List[str],
-    aliases: Dict[str, List[str]],
-    window_title: str,
-    ocr_lines: List[str],
-    clues: Dict[str, Any],
-    min_confidence: float = 0.70,
-) -> Tuple[Optional[str], float]:
-    """Match window content to a known project using fuzzy matching.
-
-    Analyzes window title, OCR text, domains, and repository tokens to find
-    the best matching project from the configured list. Uses fuzzy string
-    matching to handle variations in naming.
-
-    Args:
-        projects: List of known project names.
-        aliases: Dictionary mapping project names to lists of alias strings.
-        window_title: Title of the active window.
-        ocr_lines: OCR-extracted text lines.
-        clues: Dictionary containing domains and repo_tokens.
-
-    Returns:
-        Tuple of (project_name, confidence_score) where:
-        - project_name: Best matching project name, or None if no good match.
-        - confidence_score: Match quality from 0.0 to 1.0.
-    """
-    from rapidfuzz import process, fuzz
-
-    search_text = " ".join([window_title] + ocr_lines).lower()
-    tokens = set(re.split(r"[\s/\\]+", search_text))
-    for clue_key in ("domains", "repo_tokens", "tokens"):
-        tokens |= {
-            str(token).lower()
-            for token in clues.get(clue_key, [])
-            if str(token).strip()
-        }
-
-    # Extract repo name from GitHub URLs (e.g., github.com/funkatron/questlog -> questlog)
-    for url in clues.get("urls", []):
-        github_match = re.search(r'github\.com/[^/]+/([^/]+)', url.lower())
-        if github_match:
-            repo_name = github_match.group(1)
-            tokens.add(repo_name)
-            # Also add owner/repo combo
-            full_match = re.search(r'github\.com/([^/]+)/([^/]+)', url.lower())
-            if full_match:
-                tokens.add(f"{full_match.group(1)}/{full_match.group(2)}")
-
-    # Also check OCR text directly for github.com URLs
-    github_url_match = re.search(r'github\.com/([^/\s]+)/([^/\s]+)', search_text)
-    if github_url_match:
-        tokens.add(github_url_match.group(2))  # repo name
-        tokens.add(f"{github_url_match.group(1)}/{github_url_match.group(2)}")  # owner/repo
-
-    best_match_name = None
-    best_match_score = 0.0
-
-    # Build candidate list: (project_name, search_string)
-    candidates: List[Tuple[str, str]] = []
-    for project in projects or []:
-        candidates.append((project, project))
-        for alias in (aliases or {}).get(project, []):
-            candidates.append((project, alias))
-
-    # Find best fuzzy match
-    for project_name, candidate in candidates:
-        match_result = process.extractOne(
-            candidate.lower(),
-            tokens,
-            scorer=fuzz.partial_ratio
-        )
-        if match_result:
-            score = match_result[1]
-            if score > best_match_score:
-                best_match_score = score
-                best_match_name = project_name
-
-    confidence = best_match_score / 100.0
-    if confidence < min_confidence:
-        return None, confidence
-    return best_match_name, confidence
 
 
 def summarize(
@@ -472,8 +393,20 @@ def summarize(
             summ = f"{window_title} in Safari" if window_title and window_title != "Unknown" else "Browsing in Safari"
     if app == "Zoom Workplace" and _norm_text(summ) in {"workplace", "meeting"}:
         summ = "Meeting in Zoom Workplace"
+    if app == "Cursor" and _norm_text(summ) in {"selection", "run", "terminal", "unknown"}:
+        summ = "Coding in Cursor"
     if app == "Safari" and _norm_text(summ) in {"workflow runs", "campaigns", "issues"}:
         summ = f"{summ} in Safari"
+    if app == "Safari" and "workflow runs" in ocr_text:
+        coarse_task = "Meeting"
+        if "linear" not in _norm_text(summ):
+            summ = f"Linear {summ}" if summ else "Linear workflow tracking in Safari"
+    if app == "Draw Things" and (
+        _norm_text(summ) in {"cruft", "draw", "image", "wwindow", "safari"}
+        or _norm_text(window_title) == "safari"
+    ):
+        summ = "Browsing in Safari with Draw Things frontmost"
+        coarse_task = "Research"
     summ = summ.strip() or (f"{coarse_task} in {app}" if coarse_task != "Unknown" else f"Using {app}")
 
     conf = 0.5
@@ -629,9 +562,8 @@ def infer_app_from_content(window_title: str, ocr_lines: List[str]) -> str:
     return "Unknown"
 
 
-def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
-    """Pick a more informative window-title candidate from OCR text."""
-    app_norm = _norm_text(app)
+def _generic_title_tokens(app_norm: str) -> set[str]:
+    """Return OCR tokens that are too generic to use as a window title."""
     generic = {
         "",
         "unknown",
@@ -644,13 +576,25 @@ def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
         "run",
         "terminal",
         "selection",
-        "meeting",
         "zoom",
-        "cursor",
         "slack",
         "draw",
         "image",
     }
+    if app_norm != "zoom workplace":
+        generic.add("meeting")
+        generic.add("workplace")
+    if app_norm != "cursor":
+        generic.add("cursor")
+    if app_norm == "cursor":
+        generic.update({"selection", "run", "terminal"})
+    return generic
+
+
+def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
+    """Pick a more informative window-title candidate from OCR text."""
+    app_norm = _norm_text(app)
+    generic = _generic_title_tokens(app_norm)
     ambient_penalties = (
         "check in",
         "single image",
@@ -682,6 +626,10 @@ def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
             score += 18
         if app_norm == "cursor" and norm in {"terminal", "run", "selection"}:
             score += 18
+        if app_norm == "cursor" and "check in" in norm:
+            score -= 30
+        if app_norm == "cursor" and norm == "cursor":
+            score += 25
         if app_norm == "draw things" and ("cruft" in norm or "draw" in norm):
             score += 6
         if app_norm == "safari" and any(token in norm for token in ["workflow", "campaign", "issue", "accounts"]):
@@ -689,7 +637,14 @@ def choose_window_title_from_ocr(app: str, ocr_lines: List[str]) -> str:
         candidates.append((score, line))
     if candidates:
         candidates.sort(reverse=True)
-        return candidates[0][1][:80]
+        best = candidates[0][1][:80]
+        if app_norm == "cursor" and any(token in _norm_text(best) for token in ambient_penalties):
+            return app if app and app != "Unknown" else best
+        if app_norm == "zoom workplace" and _norm_text(best) == "workplace":
+            return "Meeting"
+        if app_norm == "draw things" and _norm_text(best) == "cruft":
+            return "Safari"
+        return best
     return app if app and app != "Unknown" else "Unknown"
 
 

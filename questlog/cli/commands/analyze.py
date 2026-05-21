@@ -9,7 +9,8 @@ from pathlib import Path
 import requests
 import typer
 
-from ql.processing import resolve_project, summarize
+from ql.project import resolve_project
+from ql.processing import summarize
 from ql.text import build_historian_prompt, extract_clues, find_artifacts, redact
 from questlog.config import load_config
 from questlog.services import ImageService, setup_logging
